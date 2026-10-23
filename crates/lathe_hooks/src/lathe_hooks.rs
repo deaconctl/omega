@@ -8,10 +8,6 @@
 //! against future Zed updates. See `lathe-extraction-plan.md` for the seam
 //! patterns this enables and the migration order.
 //!
-//! The registry is intentionally empty at this stage (Phase 0): it is the
-//! landing zone that later extraction phases populate. Keeping the container
-//! here means the upstream init site stays a single line as features move in.
-//!
 //! # Adding an extension point
 //!
 //! 1. Add a field to [`LatheHooks`] holding your callback, e.g.
@@ -22,13 +18,20 @@
 //! 2. Register it from your feature crate's `init` via [`LatheHooks::update`].
 //! 3. Read it from the one upstream call site via [`LatheHooks::get`].
 
-use gpui::{App, Global};
+use gpui::{AnyElement, App, Global, Window};
+use std::rc::Rc;
+
+/// Renders an element for an upstream view, or nothing.
+pub type ElementHook = Rc<dyn Fn(&mut Window, &mut App) -> Option<AnyElement>>;
 
 /// Registry of Lathe extension points, installed as a GPUI global by [`init`].
 ///
 /// See the module documentation for how to add a new extension point.
 #[derive(Default)]
-pub struct LatheHooks {}
+pub struct LatheHooks {
+    /// Status items shown in the title bar just left of the user menu.
+    pub title_bar_status_items: Vec<ElementHook>,
+}
 
 #[derive(Default)]
 struct GlobalLatheHooks(LatheHooks);
@@ -53,6 +56,15 @@ impl LatheHooks {
     pub fn update(cx: &mut App, f: impl FnOnce(&mut LatheHooks)) {
         f(&mut cx.default_global::<GlobalLatheHooks>().0);
     }
+}
+
+/// Renders every title bar status item. The hooks are cloned out of the
+/// registry first, because rendering needs `cx` mutably.
+pub fn title_bar_status_items(window: &mut Window, cx: &mut App) -> Vec<AnyElement> {
+    let hooks = LatheHooks::get(cx)
+        .map(|hooks| hooks.title_bar_status_items.clone())
+        .unwrap_or_default();
+    hooks.iter().filter_map(|hook| hook(window, cx)).collect()
 }
 
 /// Install the Lathe hook registry. Call once during application startup.

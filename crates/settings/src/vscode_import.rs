@@ -237,6 +237,7 @@ impl VsCodeSettings {
             pull_request_panel: None,
             git_activity_panel: None,
             mobile_dev_panel: None,
+            companion: None,
             global_lsp_settings: skip_default(GlobalLspSettingsContent {
                 semantic_token_rules: self.semantic_token_rules(),
                 ..GlobalLspSettingsContent::default()

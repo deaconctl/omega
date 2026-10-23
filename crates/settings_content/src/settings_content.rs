@@ -214,6 +214,9 @@ pub struct SettingsContent {
     /// Settings for the mobile development panel.
     pub mobile_dev_panel: Option<PanelSettingsContent>,
 
+    /// Settings for the Lathe Companion mobile app connection.
+    pub companion: Option<CompanionSettingsContent>,
+
     pub tabs: Option<ItemSettingsContent>,
     pub tab_bar: Option<TabBarSettingsContent>,
     pub tab_switcher: Option<TabSwitcherSettingsContent>,
@@ -479,7 +482,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
         call_hierarchy, command_palette, file_finder, git_panel, repository_dashboard_pinned_repos,
-        pull_request_panel, git_activity_panel, mobile_dev_panel, tabs, tab_bar, tab_switcher,
+        pull_request_panel, git_activity_panel, mobile_dev_panel, companion, tabs, tab_bar, tab_switcher,
         status_bar, preview_tabs, agent, agent_servers, ai_accounts, audio, auto_update,
         base_keymap, collaboration_panel, debugger, diagnostics, git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
@@ -802,6 +805,25 @@ pub struct CallSettingsContent {
     ///
     /// Default: false
     pub share_on_join: Option<bool>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct CompanionSettingsContent {
+    /// Whether Lathe connects to the companion relay so paired phones can follow
+    /// and continue agent threads.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// WebSocket URL of the companion relay.
+    ///
+    /// Default: "wss://companion.lathe-ide.com"
+    pub relay_url: Option<String>,
+    /// Whether to keep the computer awake while an agent thread is running, so a
+    /// phone following it doesn't lose the connection when the display sleeps.
+    ///
+    /// Default: true
+    pub keep_awake_while_agents_run: Option<bool>,
 }
 
 #[with_fallible_options]

@@ -406,6 +406,7 @@ impl Render for TitleBar {
                             ),
                     )
                 })
+                .children(lathe_hooks::title_bar_status_items(window, cx))
                 .when(TitleBarSettings::get_global(cx).show_user_menu, |this| {
                     this.child(self.render_user_menu_button(cx))
                 })
