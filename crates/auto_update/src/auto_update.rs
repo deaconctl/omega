@@ -782,10 +782,17 @@ impl AutoUpdater {
                 os: os.to_owned(),
                 arch: arch.to_owned(),
             };
+            let version = version.map(|mut version| {
+                version.pre = semver::Prerelease::EMPTY;
+                version.build = semver::BuildMetadata::EMPTY;
+                version.to_string()
+            });
             return lathe_update::get_release_asset(
                 client.http_client(),
                 &api_url,
                 release_channel,
+                version.as_deref(),
+                asset,
                 os,
                 arch,
                 prefer_appimage,
