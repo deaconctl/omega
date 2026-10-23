@@ -28,7 +28,7 @@ Lathe has a Mobile panel that works out what kind of project you opened, Expo or
 
 For bare React Native it reads the project's own package scripts plus whatever run hints are in its README, then gives you iOS scheme and Android variant dropdowns that feed into those scripts. Android installs go through `gradlew :app:install<Variant>` and an `adb` launch, which sidesteps the React Native CLI's flavored-APK bug. Anything long-running (Metro, builds, any script you kick off) opens as an interactive terminal tab with its own scrollback.
 
-The panel will also create Pixel phone and Pixel Tablet AVDs without Android Studio, keep a live device list with per-app logcat, drive one-click debug build & run and EAS cloud builds, and install the entire Android toolchain for you: JDK 17, the Android SDK, licenses accepted, all into a directory Lathe manages. On macOS it does iOS too. There's a drop-in `.zed/tasks.json` template and a full setup walkthrough in [docs/mobile-development.md](mobile-development.md).
+The panel will also create Pixel phone, Pixel Tablet, and Pixel Fold AVDs without Android Studio, keep a live device list with per-app logcat, drive one-click debug build & run and EAS cloud builds, and install the entire Android toolchain for you: JDK 17, the Android SDK, licenses accepted, all into a directory Lathe manages. On macOS it does iOS too. There's a drop-in `.zed/tasks.json` template and a full setup walkthrough in [docs/mobile-development.md](mobile-development.md).
 
 ![Mobile Panel, iOS](../assets/screenshots/mobile-panel-ios.png)
 
