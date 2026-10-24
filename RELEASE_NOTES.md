@@ -16,10 +16,6 @@ Search Everywhere is the big one. Press shift twice.
 
 - **Remote development over SSH.** Connecting to a remote machine needs a server binary matching your Lathe version, and releases never included one, so it had nothing to download. Every release ships it now, starting with this one.
 
-### Under the hood
-
-- Groundwork for Lathe Companion, a phone app for following and answering agent threads. It's off by default and the phone app isn't out yet, so there's nothing to try.
-
 ---
 
 ## v1.13.0-beta - 2026-10-20
