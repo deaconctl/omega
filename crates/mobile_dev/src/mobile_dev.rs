@@ -130,6 +130,8 @@ actions!(
         CreateAvd,
         /// Create a default Android tablet emulator (AVD) within Lathe.
         CreateTabletAvd,
+        /// Create a default Android foldable emulator (AVD) within Lathe.
+        CreateFoldableAvd,
         /// Launch the Spotlight sidecar for live Sentry monitoring.
         StartSpotlight,
         /// Stop the running Spotlight sidecar.
@@ -263,6 +265,11 @@ fn register_workspace_actions(
         .register_action(|workspace, _: &CreateTabletAvd, window, cx| {
             with_panel_in(workspace, window, cx, |panel, window, cx| {
                 panel.create_avd(emulator::AvdProfile::Tablet, window, cx)
+            });
+        })
+        .register_action(|workspace, _: &CreateFoldableAvd, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.create_avd(emulator::AvdProfile::Foldable, window, cx)
             });
         })
         .register_action(|workspace, _: &StartSpotlight, window, cx| {
@@ -434,7 +441,6 @@ struct TerminalTab {
 /// Bottom-dock panel for mobile development.
 pub struct MobileDevPanel {
     workspace: WeakEntity<Workspace>,
-    #[allow(dead_code)] // used by upcoming worktree-change subscription that re-runs detection.
     project: Entity<Project>,
     focus_handle: FocusHandle,
     width: Option<Pixels>,
@@ -442,9 +448,12 @@ pub struct MobileDevPanel {
     apple_device_state: AppleDeviceListState,
     /// The currently selected device, if any.
     selected_device: Option<SelectedDevice>,
-    /// Detected React Native / Expo project metadata for the active workspace.
-    /// `None` while detection is in flight or when the project is not a mobile
-    /// project.
+    /// Every React Native / Expo project detected across the workspace's
+    /// folders, in worktree order.
+    mobile_projects: Vec<MobileProject>,
+    /// The project that build, run and script actions target, chosen from
+    /// `mobile_projects`. `None` while detection is in flight or when the
+    /// workspace has no mobile project.
     mobile_project: Option<MobileProject>,
     /// `true` once the first detection pass has completed (so we can show
     /// the "not a mobile project" empty state instead of a perpetual
@@ -498,50 +507,17 @@ impl MobileDevPanel {
         let focus_handle = cx.focus_handle();
         let project = workspace.project().clone();
 
-        let project_detector = cx.spawn({
-            let project = project.clone();
-            async move |this, cx| {
-                let worktree_roots: Vec<std::path::PathBuf> = this
-                    .read_with(cx, |_, cx| {
-                        project
-                            .read(cx)
-                            .visible_worktrees(cx)
-                            .map(|wt| wt.read(cx).abs_path().to_path_buf())
-                            .collect()
-                    })
-                    .unwrap_or_default();
+        let worktree_subscription =
+            cx.subscribe(&project, |panel, _, event, cx| match event {
+                project::Event::WorktreeAdded(_)
+                | project::Event::WorktreeRemoved(_)
+                | project::Event::WorktreeOrderChanged => {
+                    panel._project_detector = panel.spawn_project_detection(cx);
+                }
+                _ => {}
+            });
 
-                let detected = cx
-                    .background_spawn(async move {
-                        for root in worktree_roots {
-                            if let Some(project) = mobile_project::detect_at(&root) {
-                                return Some(project);
-                            }
-                        }
-                        None
-                    })
-                    .await;
-
-                this.update(cx, |panel, cx| {
-                    panel.selected_scheme = detected
-                        .as_ref()
-                        .and_then(|project| project.ios_schemes.first().cloned())
-                        .map(SharedString::from);
-                    panel.selected_variant = detected
-                        .as_ref()
-                        .and_then(|project| project.android_variants.first().cloned())
-                        .map(SharedString::from);
-                    panel.mobile_project = detected;
-                    panel.project_scanned = true;
-                    panel.update_device_tracking(cx);
-                    panel.maybe_offer_toolchain_install(cx);
-                    cx.notify();
-                })
-                .ok();
-            }
-        });
-
-        Self {
+        let mut panel = Self {
             workspace: workspace.weak_handle(),
             project,
             focus_handle,
@@ -549,6 +525,7 @@ impl MobileDevPanel {
             device_state: DeviceListState::default(),
             apple_device_state: AppleDeviceListState::default(),
             selected_device: None,
+            mobile_projects: Vec::new(),
             mobile_project: None,
             project_scanned: false,
             avds: Vec::new(),
@@ -565,11 +542,73 @@ impl MobileDevPanel {
             toolchain_offer_made: false,
             panel_active: false,
             device_trackers: None,
-            _project_detector: project_detector,
+            _project_detector: Task::ready(()),
             _toolchain_detector: Self::spawn_toolchain_detection(cx),
             _apple_toolchain_detector: Self::spawn_apple_toolchain_detection(cx),
-            _subscriptions: Vec::new(),
+            _subscriptions: vec![worktree_subscription],
+        };
+        panel._project_detector = panel.spawn_project_detection(cx);
+        panel
+    }
+
+    /// Scan every visible worktree for mobile projects. Re-run whenever the
+    /// workspace's folders change; the active project is kept when it's still
+    /// present, otherwise the first detected project becomes active.
+    fn spawn_project_detection(&self, cx: &mut Context<Self>) -> Task<()> {
+        let worktree_roots: Vec<PathBuf> = self
+            .project
+            .read(cx)
+            .visible_worktrees(cx)
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+            .collect();
+        cx.spawn(async move |this, cx| {
+            let detected = cx
+                .background_spawn(async move {
+                    worktree_roots
+                        .iter()
+                        .flat_map(|root| mobile_project::detect_in(root))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+
+            this.update(cx, |panel, cx| {
+                let previous_root = panel
+                    .mobile_project
+                    .as_ref()
+                    .map(|project| project.root.clone());
+                let active_index = previous_root
+                    .and_then(|root| detected.iter().position(|project| project.root == root))
+                    .unwrap_or(0);
+                panel.mobile_projects = detected;
+                panel.project_scanned = true;
+                panel.select_mobile_project(active_index, cx);
+                panel.maybe_offer_toolchain_install(cx);
+            })
+            .ok();
+        })
+    }
+
+    /// Make `mobile_projects[index]` the project every build, run and script
+    /// action targets. Keeps the scheme and variant when re-selecting the same
+    /// project (a re-scan), and resets them to the new project's defaults
+    /// otherwise.
+    fn select_mobile_project(&mut self, index: usize, cx: &mut Context<Self>) {
+        let selected = self.mobile_projects.get(index).cloned();
+        let same_project = selected.as_ref().map(|project| &project.root)
+            == self.mobile_project.as_ref().map(|project| &project.root);
+        if !same_project {
+            self.selected_scheme = selected
+                .as_ref()
+                .and_then(|project| project.ios_schemes.first().cloned())
+                .map(SharedString::from);
+            self.selected_variant = selected
+                .as_ref()
+                .and_then(|project| project.android_variants.first().cloned())
+                .map(SharedString::from);
         }
+        self.mobile_project = selected;
+        self.update_device_tracking(cx);
+        cx.notify();
     }
 
     fn update_device_tracking(&mut self, cx: &mut Context<Self>) {
@@ -1349,7 +1388,7 @@ impl MobileDevPanel {
             .detach_and_log_err(cx);
     }
 
-    /// Create an Android phone or tablet AVD entirely within Lathe (no Android
+    /// Create an Android phone, tablet, or foldable AVD entirely within Lathe (no Android
     /// Studio). The SDK download runs in a terminal tab, and the new AVD
     /// appears in the Android dropdown once the tracker next polls.
     fn create_avd(
@@ -1372,13 +1411,23 @@ impl MobileDevPanel {
         let image = emulator::default_system_image();
         let name = profile.avd_name();
         let device_id = profile.device_id();
+        let (cmdline_tools_package, avdmanager) = match profile.cmdline_tools_version() {
+            Some(version) => (
+                format!(" 'cmdline-tools;{version}'"),
+                sdk.join(format!(
+                    "cmdline-tools/{version}/bin/{}",
+                    toolchain::tool_script("avdmanager")
+                )),
+            ),
+            None => (String::new(), avdmanager),
+        };
         let sdkmanager = shell_quote(&sdkmanager.to_string_lossy());
         let avdmanager = shell_quote(&avdmanager.to_string_lossy());
         // Accept licenses, install the emulator + system image, then create the
         // AVD, answering avdmanager's hardware-profile prompt with the default.
         let command = format!(
             "yes | {sdkmanager} --licenses >/dev/null 2>&1; \
-             {sdkmanager} 'emulator' '{image}' && \
+             {sdkmanager} 'emulator' '{image}'{cmdline_tools_package} && \
              echo no | {avdmanager} create avd -n '{name}' -k '{image}' -d {device_id} --force"
         );
         self.run_shell_in_terminal(
@@ -1650,12 +1699,22 @@ impl MobileDevPanel {
                                 });
                             },
                         );
+                        let tablet_panel = panel.clone();
                         menu = menu.entry(
                             "Create AVD (Tablet, Pixel Tablet API 35)",
                             None,
                             move |window, cx| {
-                                panel.update(cx, |panel, cx| {
+                                tablet_panel.update(cx, |panel, cx| {
                                     panel.create_avd(emulator::AvdProfile::Tablet, window, cx)
+                                });
+                            },
+                        );
+                        menu = menu.entry(
+                            "Create AVD (Foldable, Pixel 9 Pro Fold API 35)",
+                            None,
+                            move |window, cx| {
+                                panel.update(cx, |panel, cx| {
+                                    panel.create_avd(emulator::AvdProfile::Foldable, window, cx)
                                 });
                             },
                         );
@@ -2286,7 +2345,66 @@ impl MobileDevPanel {
         Some(row)
     }
 
-    fn render_project_section(&self) -> impl IntoElement {
+    /// The active project's name, as a dropdown of every detected project when
+    /// the workspace holds more than one.
+    fn render_project_name(&self, project: &MobileProject, cx: &mut Context<Self>) -> AnyElement {
+        let name = SharedString::from(project.display_name.clone());
+        if self.mobile_projects.len() < 2 {
+            return Label::new(name).size(LabelSize::Small).into_any_element();
+        }
+        let options: Vec<(SharedString, PathBuf)> = self
+            .mobile_projects
+            .iter()
+            .map(|project| {
+                (
+                    SharedString::from(project.display_name.clone()),
+                    project.root.clone(),
+                )
+            })
+            .collect();
+        let active_root = project.root.clone();
+        let panel = cx.entity();
+        PopoverMenu::new("mobile-project")
+            .trigger(
+                Button::new("mobile-project-trigger", name)
+                    .style(ui::ButtonStyle::Filled)
+                    .label_size(LabelSize::Small)
+                    .end_icon(
+                        ui::Icon::new(IconName::ChevronDown)
+                            .size(ui::IconSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
+            .menu(move |window, cx| {
+                let panel = panel.clone();
+                let options = options.clone();
+                let active_root = active_root.clone();
+                Some(ContextMenu::build(
+                    window,
+                    cx,
+                    move |mut menu, _window, _cx| {
+                        for (index, (name, root)) in options.iter().enumerate() {
+                            let panel = panel.clone();
+                            menu = menu.toggleable_entry(
+                                name.clone(),
+                                *root == active_root,
+                                IconPosition::Start,
+                                None,
+                                move |_window, cx| {
+                                    panel.update(cx, |panel, cx| {
+                                        panel.select_mobile_project(index, cx);
+                                    });
+                                },
+                            );
+                        }
+                        menu
+                    },
+                ))
+            })
+            .into_any_element()
+    }
+
+    fn render_project_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let v = v_flex().w_full().gap_1().px_3().py_2();
         if !self.project_scanned {
             return v.child(
@@ -2310,10 +2428,7 @@ impl MobileDevPanel {
                                 .size(ui::IconSize::XSmall)
                                 .color(Color::Muted),
                         )
-                        .child(
-                            Label::new(SharedString::from(project.display_name.clone()))
-                                .size(LabelSize::Small),
-                        )
+                        .child(self.render_project_name(project, cx))
                         .child(div().flex_1())
                         .child(
                             Label::new(project.kind.label())
@@ -2660,7 +2775,7 @@ impl Render for MobileDevPanel {
                     .min_h_0()
                     .w_full()
                     .overflow_y_scroll()
-                    .child(self.render_project_section())
+                    .child(self.render_project_section(cx))
                     .when_some(self.render_readme_section(cx), |this, section| {
                         this.child(section)
                     })

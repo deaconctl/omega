@@ -147,6 +147,34 @@ impl MobileProject {
     }
 }
 
+/// Every mobile project in a workspace folder: the folder itself, or, when it
+/// isn't one, its immediate subdirectories, so a folder that holds several
+/// app repos side by side surfaces each of them. Results are ordered by path.
+/// I/O is synchronous; call from a background task.
+pub fn detect_in(root: &Path) -> Vec<MobileProject> {
+    if let Some(project) = detect_at(root) {
+        return vec![project];
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut children: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_dir()))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            !name.starts_with('.') && name != "node_modules"
+        })
+        .map(|entry| entry.path())
+        .collect();
+    children.sort();
+    children
+        .iter()
+        .filter_map(|child| detect_at(child))
+        .collect()
+}
+
 /// Recognise the project rooted at `root`, or `None` if it isn't a React
 /// Native / Expo project. I/O is synchronous; call from a background task.
 pub fn detect_at(root: &Path) -> Option<MobileProject> {
@@ -718,6 +746,50 @@ mod tests {
             Some("com.example.unbenched")
         );
         assert!(project.uses_eas);
+    }
+
+    #[test]
+    fn detects_every_project_in_a_parent_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "second-app/package.json",
+            r#"{"name": "second-app", "dependencies": {"expo": "54.0.0"}}"#,
+        );
+        write(
+            tmp.path(),
+            "first-app/package.json",
+            r#"{"name": "first-app", "dependencies": {"expo": "54.0.0"}}"#,
+        );
+        write(tmp.path(), "docs/package.json", r#"{"name": "docs"}"#);
+        write(
+            tmp.path(),
+            ".hidden/package.json",
+            r#"{"name": "hidden", "dependencies": {"expo": "54.0.0"}}"#,
+        );
+        let names: Vec<String> = detect_in(tmp.path())
+            .into_iter()
+            .map(|project| project.display_name)
+            .collect();
+        assert_eq!(names, vec!["first-app", "second-app"]);
+    }
+
+    #[test]
+    fn detect_in_prefers_the_folder_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name": "root-app", "dependencies": {"expo": "54.0.0"}}"#,
+        );
+        write(
+            tmp.path(),
+            "nested/package.json",
+            r#"{"name": "nested", "dependencies": {"expo": "54.0.0"}}"#,
+        );
+        let projects = detect_in(tmp.path());
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].display_name, "root-app");
     }
 
     #[test]

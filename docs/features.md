@@ -28,7 +28,7 @@ Lathe has a Mobile panel that works out what kind of project you opened, Expo or
 
 For bare React Native it reads the project's own package scripts plus whatever run hints are in its README, then gives you iOS scheme and Android variant dropdowns that feed into those scripts. Android installs go through `gradlew :app:install<Variant>` and an `adb` launch, which sidesteps the React Native CLI's flavored-APK bug. Anything long-running (Metro, builds, any script you kick off) opens as an interactive terminal tab with its own scrollback.
 
-The panel will also create Pixel phone and Pixel Tablet AVDs without Android Studio, keep a live device list with per-app logcat, drive one-click debug build & run and EAS cloud builds, and install the entire Android toolchain for you: JDK 17, the Android SDK, licenses accepted, all into a directory Lathe manages. On macOS it does iOS too. There's a drop-in `.zed/tasks.json` template and a full setup walkthrough in [docs/mobile-development.md](mobile-development.md).
+The panel will also create Pixel phone, Pixel Tablet, and Pixel Fold AVDs without Android Studio, keep a live device list with per-app logcat, drive one-click debug build & run and EAS cloud builds, and install the entire Android toolchain for you: JDK 17, the Android SDK, licenses accepted, all into a directory Lathe manages. On macOS it does iOS too. There's a drop-in `.zed/tasks.json` template and a full setup walkthrough in [docs/mobile-development.md](mobile-development.md).
 
 ![Mobile Panel, iOS](../assets/screenshots/mobile-panel-ios.png)
 
@@ -256,6 +256,9 @@ Sign into more than one Zed Cloud account and switch between them from the avata
 
 ### Color swatches and a color picker
 Hex, `0x` hex, `rgb()`, and `hsl()` values get a small swatch in front of them, with or without a language server. Click the swatch (or right-click and choose **Pick Color**) to adjust the color; the new value is written back in the same notation as one undo step. An all-digit `#123` in Markdown or a commit message is left alone, since that's usually an issue number.
+
+### Search Everywhere
+`search everywhere: toggle` opens one picker that searches files, symbols, and actions together, so you don't have to remember whether you wanted the file finder, the symbol picker, or the command palette. Results come in sections, a few from each source, with a **Show all** row when there's more; tabs across the top (All, Types, Files, Symbols, Actions) narrow it to one kind, and Tab cycles through them. Types are the classes, structs, interfaces, and enums from the symbol results. Files and actions show up as you type, and symbols fill in as each language server answers, so a slow server doesn't hold up the rest. Picking a result does what its own picker would: files open the way the file finder opens them, symbols jump to their definition, actions run. Press `shift shift` (tap Shift twice) to open it, in every keymap. In the JetBrains keymap that used to open the command palette.
 
 ### Open Recent File
 **Open Recent File** in the File menu and on the welcome page (`alt-cmd-shift-o` on macOS) reopens files you've had open recently, not just projects.

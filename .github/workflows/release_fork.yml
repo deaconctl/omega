@@ -86,6 +86,20 @@ jobs:
           ZED_COMMIT_SHA: ${{ github.sha }}
         run: script/build-fork
 
+      - name: Build remote server
+        # SSH remoting downloads lathe-remote-server-<os>-<arch>.gz from the
+        # release matching the client's exact version. Built in its own
+        # cargo invocation, like upstream's bundle-mac, so feature
+        # unification with the app doesn't leak into it.
+        env:
+          ZED_COMMIT_SHA: ${{ github.sha }}
+        run: |
+          triple=$(rustc --version --verbose | sed -n 's/^host: //p')
+          cargo build --release --package remote_server --target "$triple"
+          strip -x "target/$triple/release/remote_server"
+          gzip -f --stdout --best "target/$triple/release/remote_server" \
+            > target/release/lathe-remote-server-macos-aarch64.gz
+
       - name: Verify signing identity
         run: |
           echo "Checking for signing identity..."
@@ -107,6 +121,7 @@ jobs:
           path: |
             target/release/Lathe-*.zip
             target/release/Lathe-*.dmg
+            target/release/lathe-remote-server-macos-*.gz
           if-no-files-found: error
 
       - name: Clean up keychain
@@ -350,6 +365,19 @@ jobs:
           ZED_COMMIT_SHA: ${{ github.sha }}
         run: script/build-fork-linux
 
+      - name: Build remote server
+        # Separate cargo invocation for the same reason as on macOS. Built in
+        # the 20.04 container so the server runs on hosts back to glibc 2.31.
+        shell: bash
+        env:
+          ZED_COMMIT_SHA: ${{ github.sha }}
+        run: |
+          triple=$(rustc --version --verbose | sed -n 's/^host: //p')
+          cargo build --release --package remote_server --target "$triple"
+          strip "target/$triple/release/remote_server"
+          gzip -f --stdout --best "target/$triple/release/remote_server" \
+            > "target/release/lathe-remote-server-linux-${{ matrix.arch }}.gz"
+
       - name: Install appimagetool
         # Pinned tool and runtime so a release doesn't silently change with
         # upstream's "continuous" builds. The static type2 runtime means
@@ -404,6 +432,7 @@ jobs:
           path: |
             target/release/Lathe-*-linux.tar.gz
             target/release/Lathe-*-linux.AppImage
+            target/release/lathe-remote-server-linux-*.gz
           if-no-files-found: error
 
   build-windows:
@@ -569,11 +598,19 @@ jobs:
           mkdir -p release-files
           cp artifacts/lathe-macos/Lathe-*.zip release-files/
           cp artifacts/lathe-macos/Lathe-*.dmg release-files/
+          cp artifacts/lathe-macos/lathe-remote-server-*.gz release-files/
+          cp artifacts/lathe-linux-x86_64/lathe-remote-server-*.gz release-files/
           cp artifacts/lathe-linux-x86_64/Lathe-*-linux.tar.gz release-files/
           cp artifacts/lathe-linux-x86_64/Lathe-*-linux.AppImage release-files/
           shopt -s nullglob
           linux_aarch64_tar=(artifacts/lathe-linux-aarch64/Lathe-*-linux.tar.gz)
           linux_aarch64_appimage=(artifacts/lathe-linux-aarch64/Lathe-*-linux.AppImage)
+          linux_aarch64_remote_server=(artifacts/lathe-linux-aarch64/lathe-remote-server-*.gz)
+          if [ ${#linux_aarch64_remote_server[@]} -gt 0 ]; then
+            cp "${linux_aarch64_remote_server[@]}" release-files/
+          else
+            echo "::warning::Linux aarch64 remote server was not produced; continuing without it"
+          fi
           if [ ${#linux_aarch64_tar[@]} -gt 0 ]; then
             cp "${linux_aarch64_tar[@]}" release-files/
           else

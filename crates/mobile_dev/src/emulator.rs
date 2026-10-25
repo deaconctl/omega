@@ -58,6 +58,7 @@ pub fn default_system_image() -> &'static str {
 pub enum AvdProfile {
     Phone,
     Tablet,
+    Foldable,
 }
 
 impl AvdProfile {
@@ -65,6 +66,7 @@ impl AvdProfile {
         match self {
             Self::Phone => "Lathe_Pixel_API35",
             Self::Tablet => "Lathe_Pixel_Tablet_API35",
+            Self::Foldable => "Lathe_Pixel_Fold_API35",
         }
     }
 
@@ -72,6 +74,21 @@ impl AvdProfile {
         match self {
             Self::Phone => "pixel_7",
             Self::Tablet => "pixel_tablet",
+            // Newest foldable in Google's avdmanager device catalog; there is
+            // no Pixel 10 Pro Fold definition yet.
+            Self::Foldable => "pixel_9_pro_fold",
+        }
+    }
+
+    /// A pinned command-line tools version whose `avdmanager` knows this
+    /// profile's hardware definition. Lathe's bootstrap installs cmdline-tools
+    /// 12.0, which predates the Pixel foldables, and sdkmanager can't upgrade
+    /// `cmdline-tools/latest` in place (it installs to `latest-2` instead), so
+    /// these profiles install a versioned copy alongside and use its avdmanager.
+    pub fn cmdline_tools_version(self) -> Option<&'static str> {
+        match self {
+            Self::Phone | Self::Tablet => None,
+            Self::Foldable => Some("19.0"),
         }
     }
 
@@ -79,6 +96,7 @@ impl AvdProfile {
         match self {
             Self::Phone => "Phone (Pixel, API 35)",
             Self::Tablet => "Tablet (Pixel Tablet, API 35)",
+            Self::Foldable => "Foldable (Pixel 9 Pro Fold, API 35)",
         }
     }
 }
@@ -142,5 +160,8 @@ mod tests {
         assert_eq!(AvdProfile::Phone.device_id(), "pixel_7");
         assert_eq!(AvdProfile::Tablet.avd_name(), "Lathe_Pixel_Tablet_API35");
         assert_eq!(AvdProfile::Tablet.device_id(), "pixel_tablet");
+        assert_eq!(AvdProfile::Foldable.avd_name(), "Lathe_Pixel_Fold_API35");
+        assert_eq!(AvdProfile::Foldable.device_id(), "pixel_9_pro_fold");
+        assert_eq!(AvdProfile::Foldable.cmdline_tools_version(), Some("19.0"));
     }
 }

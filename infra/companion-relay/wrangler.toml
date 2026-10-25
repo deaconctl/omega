@@ -1,0 +1,28 @@
+name = "lathe-companion-relay"
+main = "src/index.ts"
+compatibility_date = "2026-10-15"
+workers_dev = true
+
+# One object per paired desktop. SQLite-backed classes are the only kind the
+# Workers Free plan allows.
+[[durable_objects.bindings]]
+name = "DESKTOP_RELAY"
+class_name = "DesktopRelay"
+
+# Subscription cache, outage records and the device-to-desktop index. Create
+# the namespace with `npx wrangler kv namespace create SUBSCRIPTIONS` and put
+# the id it prints here.
+[[kv_namespaces]]
+binding = "SUBSCRIPTIONS"
+id = "7a80c69fadcb4024b747329e23c3066f"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DesktopRelay"]
+
+[observability]
+enabled = false
+
+[[routes]]
+pattern = "companion.lathe-ide.com"
+custom_domain = true

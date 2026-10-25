@@ -263,16 +263,59 @@ pub async fn get_release_asset(
     http_client: Arc<HttpClientWithUrl>,
     api_url: &str,
     channel: ReleaseChannel,
+    version: Option<&str>,
+    asset: &str,
     os: &str,
     arch: &str,
     prefer_appimage: bool,
     ping: &UpdatePing,
 ) -> Result<ReleaseAsset> {
     let releases = get_releases(http_client, api_url, Some(ping)).await?;
-    let release = releases
-        .into_iter()
-        .find(|release| release_matches_channel(release, channel))
-        .with_context(|| format!("no release matched channel {:?} at {api_url}", channel))?;
+    let release = match version {
+        // The remote server must be the exact build the client was released
+        // with, so a pinned version never falls back to the newest release.
+        Some(version) => {
+            let suffix = channel_tag_suffix(channel).unwrap_or_default();
+            let tag = format!("v{}{suffix}", version.trim_start_matches('v'));
+            releases
+                .into_iter()
+                .find(|release| !release.draft && release.tag_name == tag)
+                .with_context(|| format!("no release tagged {tag} at {api_url}"))?
+        }
+        None => releases
+            .into_iter()
+            .find(|release| release_matches_channel(release, channel))
+            .with_context(|| format!("no release matched channel {:?} at {api_url}", channel))?,
+    };
+
+    let asset = select_asset(&release, asset, os, arch, prefer_appimage)?;
+
+    // tag_name like "v0.234.7" -> semver "0.234.7".
+    let version = release.tag_name.trim_start_matches('v').to_string();
+
+    Ok(ReleaseAsset {
+        version,
+        url: asset.browser_download_url,
+    })
+}
+
+fn select_asset(
+    release: &GitHubRelease,
+    asset: &str,
+    os: &str,
+    arch: &str,
+    prefer_appimage: bool,
+) -> Result<GitHubAsset> {
+    if asset == "zed-remote-server" {
+        let extension = if os == "windows" { "zip" } else { "gz" };
+        let name = format!("lathe-remote-server-{os}-{arch}.{extension}");
+        return release
+            .assets
+            .iter()
+            .find(|candidate| candidate.name == name)
+            .cloned()
+            .with_context(|| format!("release {} has no {name} asset", release.tag_name));
+    }
 
     // Asset naming produced by the release workflow:
     //   macOS:   Lathe-<version>-<arch>-macos.{dmg,zip}    (arch: aarch64 | x86_64)
@@ -288,7 +331,7 @@ pub async fn get_release_asset(
             && (os != "linux" || asset.name.contains("linux"))
     };
 
-    let asset = match os {
+    match os {
         "macos" => release
             .assets
             .iter()
@@ -313,14 +356,6 @@ pub async fn get_release_asset(
             "no matching asset for os={os} arch={arch} in release {}",
             release.tag_name
         )
-    })?;
-
-    // tag_name like "v0.234.7" -> semver "0.234.7".
-    let version = release.tag_name.trim_start_matches('v').to_string();
-
-    Ok(ReleaseAsset {
-        version,
-        url: asset.browser_download_url,
     })
 }
 
@@ -337,6 +372,43 @@ mod tests {
             os: "macos".into(),
             arch: "aarch64".into(),
         }
+    }
+
+    fn release_with_assets(names: &[&str]) -> GitHubRelease {
+        GitHubRelease {
+            tag_name: "v1.13.0-beta".into(),
+            name: None,
+            body: None,
+            draft: false,
+            assets: names
+                .iter()
+                .map(|name| GitHubAsset {
+                    name: (*name).into(),
+                    browser_download_url: format!("https://example.com/{name}"),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn remote_server_asset_is_not_confused_with_app_bundle() -> Result<()> {
+        let release = release_with_assets(&[
+            "Lathe-1.13.0-x86_64-linux.tar.gz",
+            "lathe-remote-server-linux-x86_64.gz",
+            "lathe-remote-server-linux-aarch64.gz",
+        ]);
+        let remote_server =
+            select_asset(&release, "zed-remote-server", "linux", "x86_64", false)?;
+        assert_eq!(remote_server.name, "lathe-remote-server-linux-x86_64.gz");
+        let app = select_asset(&release, "zed", "linux", "x86_64", false)?;
+        assert_eq!(app.name, "Lathe-1.13.0-x86_64-linux.tar.gz");
+        Ok(())
+    }
+
+    #[test]
+    fn missing_remote_server_asset_errors_instead_of_falling_back() {
+        let release = release_with_assets(&["Lathe-1.13.0-x86_64-linux.tar.gz"]);
+        assert!(select_asset(&release, "zed-remote-server", "linux", "x86_64", false).is_err());
     }
 
     #[test]

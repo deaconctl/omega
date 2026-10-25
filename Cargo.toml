@@ -137,6 +137,7 @@ members = [
     "crates/languages",
     "crates/lathe",
     "crates/lathe_data_import",
+    "crates/lathe_companion",
     "crates/lathe_hooks",
     "crates/line_ending_selector",
     "crates/livekit_api",
@@ -196,6 +197,7 @@ members = [
     "crates/scheduler",
     "crates/schema_generator",
     "crates/search",
+    "crates/search_everywhere",
     "crates/session",
     "crates/settings",
     "crates/settings_content",
@@ -418,6 +420,7 @@ language_tools = { path = "crates/language_tools" }
 languages = { path = "crates/languages" }
 lathe = { path = "crates/lathe" }
 lathe_data_import = { path = "crates/lathe_data_import" }
+lathe_companion = { path = "crates/lathe_companion" }
 lathe_hooks = { path = "crates/lathe_hooks" }
 line_ending_selector = { path = "crates/line_ending_selector" }
 livekit_api = { path = "crates/livekit_api" }
@@ -476,6 +479,7 @@ rpc = { path = "crates/rpc" }
 sandbox = { path = "crates/sandbox" }
 scheduler = { path = "crates/scheduler" }
 search = { path = "crates/search" }
+search_everywhere = { path = "crates/search_everywhere" }
 session = { path = "crates/session" }
 settings = { path = "crates/settings" }
 settings_content = { path = "crates/settings_content" }
@@ -626,6 +630,7 @@ crash-handler = "0.8"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 perf-event = { package = "perf-event2", version = "0.7.4" }
 crossbeam-queue = "0.3.12"
+crypto_box = { version = "0.9", features = ["seal"] }
 ctor = "1.0.12"
 dap-types = { git = "https://github.com/zed-industries/dap-types", rev = "1b461b310481d01e02b2603c16d7144b926339f8" }
 dashmap = "6.0"
@@ -637,6 +642,7 @@ dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
 documented = "0.10"
 dotenvy = "0.15.0"
 dunce = "1.0"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 ec4rs = { version = "1.2", features = ["allow-empty-values"] }
 emojis = "0.9"
 encoding_rs = "0.8"
@@ -857,6 +863,7 @@ proxyvars = "0.2"
 pulldown-cmark = { version = "0.13.0", default-features = false }
 quick-xml = "0.41"
 quote = "1.0.9"
+qrcodegen = "1.8"
 rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "os_rng"] }
 raw-window-handle = "0.6"
 rayon = "1.8"

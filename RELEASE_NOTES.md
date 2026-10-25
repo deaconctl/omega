@@ -2,6 +2,22 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.14.0-beta - 2026-10-23
+
+Search Everywhere is the big one. Press shift twice.
+
+### Added
+
+- **Search Everywhere.** Press `shift shift` and you get one picker for files, symbols, types and actions, grouped into sections, with tabs (All, Types, Files, Symbols, Actions) to narrow it down. Symbols show up as each language server answers, so files and actions don't wait on them. Works in every keymap. In the JetBrains keymaps it takes over the shift shift binding from the command palette.
+- **Foldable Android emulator.** The Mobile panel can create a Pixel 9 Pro Fold emulator next to the phone and tablet ones. It installs the newer Android command line tools it needs on its own.
+- Several React Native or Expo projects in one workspace. The Mobile panel finds all of them (each folder, or the folders one level down), and the project name turns into a dropdown that picks which one build, run and the scripts target.
+
+### Fixed
+
+- **Remote development over SSH.** Connecting to a remote machine needs a server binary matching your Lathe version, and releases never included one, so it had nothing to download. Every release ships it now, starting with this one.
+
+---
+
 ## v1.13.0-beta - 2026-10-20
 
 Mostly about accounts. Switching AI accounts no longer leaves your open thread behind, and the pull request panel figures out which git account to use per repo.

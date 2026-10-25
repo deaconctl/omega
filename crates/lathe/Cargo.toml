@@ -14,6 +14,7 @@ doctest = false
 
 [dependencies]
 gpui.workspace = true
+lathe_companion.workspace = true
 lathe_data_import.workspace = true
 lathe_hooks.workspace = true
 log.workspace = true

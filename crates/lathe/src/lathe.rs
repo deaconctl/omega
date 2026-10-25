@@ -34,6 +34,7 @@ pub fn init(cx: &mut App) {
     pr_ui::init(cx);
     git_graph::init(cx);
     mobile_dev::init(cx);
+    lathe_companion::init(cx);
     register_collab_account_actions(cx);
     report_data_import(cx);
 }

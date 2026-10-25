@@ -208,6 +208,7 @@ pub enum IconName {
     Pencil,
     PencilUnavailable,
     Person,
+    Phone,
     Pin,
     PlayFilled,
     PlayOutlined,
