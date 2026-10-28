@@ -2,6 +2,12 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.14.1-beta - 2026-10-27
+
+Nothing new to try in this one. It carries work on a feature that isn't out yet, which stays off by default.
+
+---
+
 ## v1.14.0-beta - 2026-10-23
 
 Search Everywhere is the big one. Press shift twice.
