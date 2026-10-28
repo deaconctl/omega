@@ -147,6 +147,14 @@ impl CompanionModal {
             .child(Label::new(text).size(LabelSize::Small).color(Color::Muted))
     }
 
+    fn start_pairing(&mut self, cx: &mut Context<Self>) {
+        let result = self
+            .companion
+            .update(cx, |companion, cx| companion.start_pairing(cx));
+        self.error = result.err().map(|error| error.to_string().into());
+        cx.notify();
+    }
+
     fn render_pairing(&self, cx: &mut Context<Self>) -> AnyElement {
         let companion = self.companion.read(cx);
         let connected = *companion.status() == ConnectionStatus::Connected;
@@ -154,29 +162,43 @@ impl CompanionModal {
             None => Button::new("pair-phone", "Pair a phone")
                 .style(ButtonStyle::Filled)
                 .disabled(!connected)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let result = this
-                        .companion
-                        .update(cx, |companion, cx| companion.start_pairing(cx));
-                    this.error = result.err().map(|error| error.to_string().into());
-                    cx.notify();
-                }))
+                .on_click(cx.listener(|this, _, _, cx| this.start_pairing(cx)))
                 .into_any_element(),
             Some(PairingState::WaitingForScan {
                 qr_payload,
+                web_link,
                 expires_at,
             }) => {
                 let minutes_left = expires_at
                     .duration_since(SystemTime::now())
                     .map(|left| left.as_secs().div_ceil(60))
                     .unwrap_or(0);
-                let link = qr_payload.clone();
+                if minutes_left == 0 {
+                    // An expired code can't pair, so it isn't shown at all.
+                    return v_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Label::new("This code has expired.")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Button::new("regenerate-pairing-code", "New code")
+                                .style(ButtonStyle::Filled)
+                                .disabled(!connected)
+                                .on_click(cx.listener(|this, _, _, cx| this.start_pairing(cx))),
+                        )
+                        .into_any_element();
+                }
+                // An https link opens from a message or a browser on any phone.
+                // Simulators and emulators open it too: `xcrun simctl openurl
+                // booted <link>` or `adb shell am start -d <link>`.
+                let link = web_link.unwrap_or_else(|| qr_payload.clone());
                 v_flex()
                     .gap_2()
                     .items_center()
                     .child(render_qr_code(&qr_payload))
-                    // Simulators have no camera; the link opens with
-                    // `xcrun simctl openurl booted <link>` or `adb shell am start -d <link>`.
                     .child(
                         Button::new("copy-pairing-link", "Copy link")
                             .on_click(move |_, _, cx| {
@@ -184,13 +206,9 @@ impl CompanionModal {
                             }),
                     )
                     .child(
-                        Label::new(if minutes_left == 0 {
-                            "This code has expired. Close and start again.".to_string()
-                        } else {
-                            format!(
-                                "Scan with the Lathe Companion app. The code expires in {minutes_left} min."
-                            )
-                        })
+                        Label::new(format!(
+                            "Scan with the Lathe Companion app. The code expires in {minutes_left} min."
+                        ))
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                     )

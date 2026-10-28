@@ -62,6 +62,9 @@ pub struct PairingRequest {
 pub enum PairingState {
     WaitingForScan {
         qr_payload: String,
+        /// The same pairing as an https link, for sharing to a phone: Android's
+        /// Messages and Chrome don't open `lathe-companion://` links.
+        web_link: Option<String>,
         expires_at: SystemTime,
     },
     AwaitingApproval(PairingRequest),
@@ -387,8 +390,10 @@ impl Companion {
         );
         self.send(json!({ "type": "pairing_open", "ttl_seconds": PAIRING_WINDOW.as_secs() }));
         self.pairing_token = Some(token);
+        let web_link = pairing_web_link(&relay_url, &qr_payload);
         self.pairing = Some(PairingState::WaitingForScan {
             qr_payload,
+            web_link,
             expires_at: SystemTime::now() + PAIRING_WINDOW,
         });
         cx.emit(CompanionEvent::Changed);
@@ -611,6 +616,23 @@ fn pairing_payload(relay_url: &str, identity: &Identity, token: &str, name: &str
         .append_pair("name", name)
         .finish();
     format!("lathe-companion://pair?{query}")
+}
+
+/// The relay's `/pair` page with the pairing in the fragment, which browsers
+/// never send to a server, so the token stays out of the relay's logs.
+fn pairing_web_link(relay_url: &str, qr_payload: &str) -> Option<String> {
+    let query = qr_payload.split_once('?')?.1;
+    let mut url = url::Url::parse(relay_url).ok()?;
+    let scheme = match url.scheme() {
+        "wss" => "https",
+        "ws" => "http",
+        _ => return None,
+    };
+    url.set_scheme(scheme).ok()?;
+    url.set_path("/pair");
+    url.set_query(None);
+    url.set_fragment(Some(query));
+    Some(url.to_string())
 }
 
 /// "Lathe Beta on Chris's MacBook Pro". Each channel pairs separately, so the
@@ -910,6 +932,55 @@ pub(crate) mod tests {
         companion.read_with(cx, |companion, _| {
             assert_eq!(companion.devices().len(), 1);
         });
+    }
+
+    #[test]
+    fn web_links_carry_the_pairing_in_the_fragment() {
+        let payload = "lathe-companion://pair?v=1&relay=wss%3A%2F%2Fcompanion.lathe-ide.com&desktop_id=abc&token=t0k&name=Lathe%20Beta";
+        assert_eq!(
+            pairing_web_link("wss://companion.lathe-ide.com", payload).as_deref(),
+            Some("https://companion.lathe-ide.com/pair#v=1&relay=wss%3A%2F%2Fcompanion.lathe-ide.com&desktop_id=abc&token=t0k&name=Lathe%20Beta")
+        );
+        // A local relay keeps its port and plain http.
+        assert_eq!(
+            pairing_web_link("ws://localhost:8799/v1/connect?x=1", payload).as_deref(),
+            Some("http://localhost:8799/pair#v=1&relay=wss%3A%2F%2Fcompanion.lathe-ide.com&desktop_id=abc&token=t0k&name=Lathe%20Beta")
+        );
+        assert_eq!(pairing_web_link("https://not-a-relay", payload), None);
+        assert_eq!(pairing_web_link("wss://companion.lathe-ide.com", "no query"), None);
+    }
+
+    #[gpui::test]
+    async fn a_new_code_replaces_the_old_one(cx: &mut TestAppContext) {
+        let (companion, mut outgoing, identity) = connected_companion(cx);
+        let payload = |companion: &Entity<Companion>, cx: &mut TestAppContext| {
+            companion.read_with(cx, |companion, _| match companion.pairing() {
+                Some(PairingState::WaitingForScan { qr_payload, .. }) => qr_payload.clone(),
+                other => panic!("unexpected pairing state {other:?}"),
+            })
+        };
+        companion.update(cx, |companion, cx| companion.start_pairing(cx)).unwrap();
+        let first = payload(&companion, cx);
+        companion.update(cx, |companion, cx| companion.start_pairing(cx)).unwrap();
+        let second = payload(&companion, cx);
+        assert_ne!(query_param(&first, "token"), query_param(&second, "token"));
+        // Each code reopens pairing on the relay for its full window.
+        let opened = drain(&mut outgoing)
+            .into_iter()
+            .filter(|message| message["type"] == "pairing_open")
+            .count();
+        assert_eq!(opened, 2);
+
+        // A phone that scanned the old code is turned away.
+        let phone = FakePhone::new();
+        let sealed = phone.sealed_request(&identity.box_public_key(), &query_param(&first, "token"));
+        companion.update(cx, |companion, cx| {
+            companion.handle_relay_message(
+                json!({ "type": "sealed", "device_id": phone.device_id(), "ciphertext": sealed }),
+                cx,
+            )
+        });
+        assert_eq!(payload(&companion, cx), second);
     }
 
     #[gpui::test]

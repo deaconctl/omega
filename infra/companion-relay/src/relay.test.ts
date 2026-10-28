@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { pairPage } from "./pair-page";
 import {
   OUTAGE_GRACE_MS, affectedDeviceIds, handleWebhook, type Kv,
 } from "./entitlements";
@@ -820,5 +821,21 @@ describe("desktop routing", () => {
     await say(pairing, { type: "sealed", ciphertext: "YWJj" });
     expect(second.last()).toEqual({ type: "sealed", device_id: "newphone2", ciphertext: "YWJj" });
     expect(first.sent).toEqual([]);
+  });
+});
+
+describe("pairing link page", () => {
+  it("is served without caching, referrers or outside resources", async () => {
+    const response = pairPage();
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
+    expect(response.headers.get("Content-Security-Policy")).toContain("default-src 'none'");
+    const html = await response.text();
+    expect(html).toContain("intent://pair?");
+    expect(html).toContain("scheme=lathe-companion;package=com.lathe.companion;end");
+    expect(html).toContain("lathe-companion://pair?");
+    // The pairing details come from the fragment, which never reaches the server.
+    expect(html).toContain("location.hash");
+    expect(html).not.toMatch(/https?:\/\//);
   });
 });
