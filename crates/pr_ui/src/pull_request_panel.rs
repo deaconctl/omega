@@ -16,11 +16,11 @@ use gpui::{
 use project::{
     Project,
     git_store::{GitStore, GitStoreEvent, Repository, RepositoryId},
-    repo_identity_path_if_local,
+    repo_identity_path,
 };
 use settings::{Settings, SettingsStore};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*, right_click_menu};
 use util::ResultExt as _;
@@ -561,9 +561,10 @@ impl PullRequestPanel {
             let (identity, is_main, label) = {
                 let repo = repository.read(cx);
                 let snapshot = repo.snapshot();
-                let identity =
-                    repo_identity_path_if_local(&snapshot.common_dir_abs_path, snapshot.path_style)
-                        .map(Path::to_path_buf);
+                let identity = Some(
+                    repo_identity_path(&snapshot.common_dir_abs_path, snapshot.path_style)
+                        .to_path_buf(),
+                );
                 let label = identity
                     .as_deref()
                     .and_then(|identity| {
@@ -1988,7 +1989,7 @@ impl PullRequestPanel {
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     // Cmd/ctrl-click and middle-click open on the host's website,
                     // matching how links behave everywhere else.
-                    if event.modifiers().secondary() || event.is_middle_click() {
+                    if event.modifiers().secondary(cx) || event.is_middle_click() {
                         cx.open_url(summary_for_click.url.as_str());
                     } else {
                         this.open_pull_request(
@@ -2587,6 +2588,7 @@ mod tests {
     use project::{FakeFs, Project};
     use serde_json::json;
     use settings::SettingsStore;
+    use std::path::Path;
     use util::path;
     use workspace::MultiWorkspace;
 

@@ -38,7 +38,7 @@ use collections::{HashMap, HashSet};
 use futures::Future;
 use futures::future::LocalBoxFuture;
 use futures::lock::OwnedMutexGuard;
-use gpui::{App, AsyncApp, Entity, EntityId, SharedString};
+use gpui::{App, AsyncApp, BackgroundExecutor, Entity, EntityId, SharedString};
 use http_client::HttpClient;
 
 pub use language_core::{
@@ -62,7 +62,8 @@ pub use language_core::{
     serialize_regex,
 };
 pub use language_registry::{
-    LanguageLoader, LanguageName, LanguageServerStatusUpdate, LoadedLanguage, ServerHealth,
+    ExtensionLanguagesUpdateOutcome, LanguageLoader, LanguageName, LanguageRegistration,
+    LanguageRegistrationStatus, LanguageServerStatusUpdate, LoadedLanguage, ServerHealth,
 };
 use lsp::{
     CodeActionKind, DownloadConsentRequest, InitializeParams, LanguageServerBinary,
@@ -73,7 +74,7 @@ pub use modeline::{ModelineSettings, parse_modeline};
 use parking_lot::Mutex;
 use regex::Regex;
 pub use runnable::{ResolvedRunnable, RunnableMatchCapture, RunnableRange, RunnableResolver};
-use http_client::github::GitHubLspBinaryVersion;
+use github_releases::GitHubLspBinaryVersion;
 use semver::Version;
 use serde_json::Value;
 use settings::WorktreeId;
@@ -102,6 +103,7 @@ pub use toolchain::{
     ToolchainMetadata, ToolchainScope,
 };
 use tree_sitter::{self, QueryCursor, WasmStore, wasmtime};
+use util::paths::PathStyle;
 use util::rel_path::RelPath;
 
 pub use available_languages::AvailableLanguage;
@@ -500,6 +502,7 @@ impl CachedLspAdapter {
 pub trait LspAdapterDelegate: Send + Sync {
     fn show_notification(&self, message: &str, cx: &mut App);
     fn http_client(&self) -> Arc<dyn HttpClient>;
+    fn background_executor(&self) -> &BackgroundExecutor;
     fn worktree_id(&self) -> WorktreeId;
     fn worktree_root_path(&self) -> &Path;
     fn resolve_relative_path(&self, path: PathBuf) -> PathBuf;
@@ -689,6 +692,7 @@ pub trait LspAdapter: 'static + Send + Sync + DynLspInstaller {
         &self,
         _command_name: &str,
         _arguments: &[serde_json::Value],
+        _path_style: PathStyle,
     ) -> Option<ClientCommand> {
         None
     }
@@ -1273,7 +1277,7 @@ impl Language {
             let mut captures = cursor.captures(query, tree.root_node(), text.text_provider());
             let capture_refs = iter::from_fn(move || {
                 let (query_match, capture_index) = captures.next()?;
-                let capture = query_match.captures[*capture_index];
+                let capture = query_match.captures()[*capture_index];
                 Some((
                     capture.node.byte_range(),
                     HighlightCaptureRef {

@@ -59,10 +59,13 @@ impl ClientRuntime {
         // fixed 512 KiB stacks of the GCD workers that poll background tasks on
         // macOS, crashing dev builds as soon as an agent sends its first
         // message. See `spawn_dedicated` for the stack guarantee.
+        let dispatch_tx = self.dispatch_tx.clone();
         self.io_task = Some(
             cx.background_executor()
                 .scheduler_executor()
                 .spawn_dedicated(move |_executor| async move {
+                    // Retained API handles can keep senders alive after disconnect cleanup completes.
+                    let _close_dispatch = util::defer(move || dispatch_tx.close_channel());
                     future.await.log_err();
                 }),
         );
@@ -215,8 +218,11 @@ mod tests {
             session_list: Rc::new(RefCell::new(None)),
             request_elicitations: store.clone(),
             active_request_scopes: None,
+            pending_session_updates: None,
+            accepts_subagent_updates: false,
         };
         let (mut runtime, shutdown) = ClientRuntime::new(context, &mut cx.to_async());
+        let retained_sender = runtime.sender();
         let (transport, peer) = agent_client_protocol::Channel::duplex();
         let (sender, received) = oneshot::channel();
         runtime.start_io(
@@ -263,6 +269,7 @@ mod tests {
         drop(store);
         cx.run_until_parked();
         assert!(weak_store.upgrade().is_none(), "foreground owner leaked");
+        drop(retained_sender);
     }
 
     #[test]
@@ -348,6 +355,8 @@ mod tests {
         )
         .expect("spawn waiting child");
         let mut child = crate::acp::transport::OwnedChild(child);
+        // status() closes stdin, which must not end the child before the guard kills it.
+        let stdin = child.0.stdin.take().expect("child stdin");
         let status = child.0.status();
         drop(child);
         let timeout = cx.background_executor.timer(Duration::from_secs(5));
@@ -358,5 +367,6 @@ mod tests {
         };
         use std::os::unix::process::ExitStatusExt as _;
         assert_eq!(status.signal(), Some(9));
+        drop(stdin);
     }
 }

@@ -108,6 +108,9 @@ fn full_entry(thread: &AcpThread, entry: &AgentThreadEntry, cx: &App) -> Entry {
                 }
             }
         }
+        AgentThreadEntry::SessionMessage(message) => Entry::AssistantMessage {
+            markdown: format!("_Session message_\n\n{}", message.content.to_markdown(cx)),
+        },
         AgentThreadEntry::ToolCall(call) => tool_call(call, cx),
         AgentThreadEntry::Elicitation(id) => {
             let message = thread
@@ -165,7 +168,7 @@ fn diffs(call: &ToolCall, cx: &App) -> Vec<FileDiff> {
             ToolCallContent::Diff(diff) | ToolCallContent::LegacyDiff { diff, .. } => {
                 let diff = diff.read(cx);
                 let path = diff.file_path(cx)?;
-                let new_text = diff.buffer()?.read(cx).text();
+                let new_text = diff.new_text(cx);
                 file_diff(path, diff.base_text(), &new_text)
             }
             ToolCallContent::DiffPatch { source, .. } => {

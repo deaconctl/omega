@@ -59,7 +59,7 @@ name = "zed"
 path = "src/main.rs"
 
 [[bin]]
-name = "zed_visual_test_runner"
+name = "zed-visual-test-runner"
 path = "src/visual_test_runner.rs"
 required-features = ["visual-tests"]
 
@@ -295,7 +295,7 @@ icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
 identifier = "dev.lathe.lathe-Dev"
 name = "Lathe Dev"
 category = "Developer Tool"
-osx_minimum_system_version = "10.15.7"
+osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["lathe"]
 
@@ -304,7 +304,7 @@ icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
 identifier = "dev.lathe.lathe-Nightly"
 name = "Lathe Nightly"
 category = "Developer Tool"
-osx_minimum_system_version = "10.15.7"
+osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["lathe"]
 
@@ -313,7 +313,7 @@ icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
 identifier = "dev.lathe.lathe-Preview"
 name = "Lathe Preview"
 category = "Developer Tool"
-osx_minimum_system_version = "10.15.7"
+osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["lathe"]
 
@@ -331,7 +331,7 @@ icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
 identifier = "dev.lathe.lathe"
 name = "Lathe"
 category = "Developer Tool"
-osx_minimum_system_version = "10.15.7"
+osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["lathe"]
 

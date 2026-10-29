@@ -1250,7 +1250,8 @@ mod tests {
         let screen_coord = cx
             .editor(|editor, _, cx| editor.pixel_position_of_cursor(cx))
             .unwrap();
-        cx.simulate_click(screen_coord, gpui::Modifiers::secondary_key());
+        let secondary_modifiers = cx.read(gpui::Modifiers::secondary_key);
+        cx.simulate_click(screen_coord, secondary_modifiers);
         cx.run_until_parked();
 
         let view = open_peek_view(&mut cx)

@@ -235,10 +235,14 @@ fn thread_status(thread: &AcpThread, errored: bool) -> ThreadStatus {
     match thread.foreground_activity() {
         ForegroundActivity::RequiresAction => ThreadStatus::WaitingInput,
         ForegroundActivity::Running => ThreadStatus::Running,
-        ForegroundActivity::Idle | ForegroundActivity::Unconfirmed if errored => {
+        ForegroundActivity::Idle | ForegroundActivity::Unconfirmed | ForegroundActivity::Unknown
+            if errored =>
+        {
             ThreadStatus::Error
         }
-        ForegroundActivity::Idle | ForegroundActivity::Unconfirmed => ThreadStatus::Idle,
+        ForegroundActivity::Idle | ForegroundActivity::Unconfirmed | ForegroundActivity::Unknown => {
+            ThreadStatus::Idle
+        }
     }
 }
 

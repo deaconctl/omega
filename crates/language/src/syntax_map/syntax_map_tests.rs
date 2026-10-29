@@ -81,7 +81,7 @@ fn test_query_text_inside_multibyte_character() -> anyhow::Result<()> {
             let mut cursor = QueryCursor::new();
             let mut matches = cursor.matches(&query, tree.root_node(), TextProvider(&text));
             let query_match = matches.next().expect("predicate matches the error node");
-            let node = query_match.captures.first().expect("error capture").node;
+            let node = query_match.captures().first().expect("error capture").node;
             assert_eq!(node.start_byte(), range.start_byte);
             assert!(!source.is_char_boundary(node.start_byte()));
             assert_eq!(
@@ -212,7 +212,7 @@ fn matching_capture_texts(query: &Query, root: Node, text: &Rope) -> Vec<String>
         if satisfies_custom_predicates(query, query_match, text) {
             captures.extend(
                 query_match
-                    .captures
+                    .captures()
                     .iter()
                     .map(|capture| text.chunks_in_range(capture.node.byte_range()).collect()),
             );

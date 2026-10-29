@@ -1598,7 +1598,7 @@ impl super::GitPanel {
         let mut fetch_tasks = Vec::with_capacity(total);
         for repo in repo_entities {
             let askpass = self.askpass_delegate("git fetch", window, cx);
-            let receiver = repo.update(cx, |repo, cx| repo.fetch(FetchOptions::All, askpass, cx));
+            let receiver = repo.update(cx, |repo, cx| repo.fetch(FetchOptions::All, Some(askpass), cx));
             fetch_tasks.push(receiver);
         }
 
@@ -2184,20 +2184,6 @@ impl super::GitPanel {
         compressed = Self::truncate_iteratively(&compressed, max_bytes);
 
         compressed
-    }
-
-    pub(super) async fn load_commit_message_prompt(cx: &mut AsyncApp) -> String {
-        let load = async {
-            let store = cx.update(|cx| PromptStore::global(cx)).await.ok()?;
-            store
-                .update(cx, |s, cx| {
-                    s.load(PromptId::BuiltIn(BuiltInPrompt::CommitMessage), cx)
-                })
-                .await
-                .ok()
-        };
-        load.await
-            .unwrap_or_else(|| BuiltInPrompt::CommitMessage.default_content().to_string())
     }
 
     pub(super) fn github_commit_author(&self, cx: &App) -> Option<(SharedString, SharedString)> {

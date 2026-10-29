@@ -35,7 +35,7 @@ impl RenderOnce for HoldForDefault {
             .text_color(Color::Muted.color(cx))
             .child("Hold")
             .child(h_flex().flex_shrink_0().children(render_modifiers(
-                &Modifiers::secondary_key(),
+                &Modifiers::secondary_key(cx),
                 PlatformStyle::platform(),
                 None,
                 Some(TextSize::Default.rems(cx).into()),
