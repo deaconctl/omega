@@ -2,6 +2,31 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.15.0-beta - 2026-10-29
+
+Caught up with upstream Zed again (186 commits). Two things to know first: Lathe now needs macOS 12 (Monterey) or newer, and the agent's "Restore Checkpoint" button is gone. Upstream dropped checkpoints because taking one before every message made the agent slow to respond.
+
+### Added
+
+- **Background git fetch.** Off by default. Turn it on with `git.auto_fetch.enabled` and set how often with `git.auto_fetch.interval_secs` (15 seconds minimum). It only runs in trusted repos and never prompts for credentials.
+- **Debugger hovers** show an expandable variable tree you can move through with the keyboard.
+- **Refs column in the git graph.** Branch and tag badges get their own resizable column, which you can hide from the column header's right-click menu. Dragging a branch onto a commit works from either column.
+- `"on_new_window": "readme"` opens the project's README in a preview tab when a window has nothing else open.
+- Commit message generation uses your recent commit messages as style examples.
+
+### Fixed
+
+- Discarding a file from the unstaged section keeps its staged changes.
+- A repo whose folder moved while open gets its git state rebuilt instead of pointing at the old location.
+- Language injections in notebook cells, and a pile of smaller agent, editor and git fixes from upstream.
+
+### Under the hood
+
+- Releases are built with Xcode 26, which upstream needs now.
+- Downloaded language servers and tools still warn in the log when a release didn't publish a checksum. Upstream moved that download code, so the warning moved with it.
+
+---
+
 ## v1.14.1-beta - 2026-10-27
 
 Nothing new to try in this one. It carries work on a feature that isn't out yet, which stays off by default.
