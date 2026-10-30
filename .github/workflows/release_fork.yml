@@ -104,8 +104,8 @@ jobs:
         run: |
           triple=$(rustc --version --verbose | sed -n 's/^host: //p')
           cargo build --release --package remote_server --target "$triple"
-          strip -x "target/$triple/release/remote_server"
-          gzip -f --stdout --best "target/$triple/release/remote_server" \
+          strip -x "target/$triple/release/remote-server"
+          gzip -f --stdout --best "target/$triple/release/remote-server" \
             > target/release/lathe-remote-server-macos-aarch64.gz
 
       - name: Verify signing identity
@@ -382,8 +382,8 @@ jobs:
         run: |
           triple=$(rustc --version --verbose | sed -n 's/^host: //p')
           cargo build --release --package remote_server --target "$triple"
-          strip "target/$triple/release/remote_server"
-          gzip -f --stdout --best "target/$triple/release/remote_server" \
+          strip "target/$triple/release/remote-server"
+          gzip -f --stdout --best "target/$triple/release/remote-server" \
             > "target/release/lathe-remote-server-linux-${{ matrix.arch }}.gz"
 
       - name: Install appimagetool
