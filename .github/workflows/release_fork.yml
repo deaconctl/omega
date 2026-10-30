@@ -210,13 +210,12 @@ jobs:
       - name: Validate Apple Event handler symbols are present
         # Regression guard for the kAEOpenDocuments fix. If the handler or
         # its registration selector disappears from the binary, Finder's
-        # "Open With" breaks silently at runtime.
+        # "Open With" breaks silently at runtime. URLs arrive through
+        # `application:openURLs:`, which has no Apple Event handler to check.
         run: |
           BIN="$APP/Contents/MacOS/zed"
           strings "$BIN" | grep -q 'handleOpenDocumentsEvent:withReplyEvent:' \
             || { echo "MISSING selector: handleOpenDocumentsEvent:withReplyEvent:"; exit 1; }
-          strings "$BIN" | grep -q 'handleGetURLEvent:withReplyEvent:' \
-            || { echo "MISSING selector: handleGetURLEvent:withReplyEvent:"; exit 1; }
           echo "  ok: Apple Event handler selectors present"
 
       - name: Validate code signature
