@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { handleWebhook, type Kv } from "./entitlements";
+import { pairPage } from "./pair-page";
 import { CLOSE_PAIRING_DONE, DEVICE_ID_PATTERN, ID_PATTERN, Relay, type Role } from "./relay";
 
 interface Env {
@@ -89,6 +90,7 @@ export default {
   async fetch(request: Request, env: Env, context: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/health") return new Response("ok");
+    if (url.pathname === "/pair" && request.method === "GET") return pairPage();
     if (url.pathname === "/v1/revenuecat") {
       return handleWebhook(request, {
         env: { ...env, SUBSCRIPTIONS: env.SUBSCRIPTIONS as Kv },

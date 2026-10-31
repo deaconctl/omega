@@ -30,6 +30,10 @@ pub enum DesktopMessage {
         start_index: usize,
         entries: Vec<Entry>,
         has_more_before: bool,
+        /// The model and effort choices the thread's agent offers. Absent
+        /// when it offers none the phone may change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_options: Option<Vec<ConfigOption>>,
     },
     ThreadOlder {
         thread_id: String,
@@ -50,6 +54,13 @@ pub enum DesktopMessage {
         options: Vec<PermissionOption>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff_preview: Option<Vec<FileDiff>>,
+    },
+    /// The thread's model and effort choices changed, from the phone, the desk
+    /// or the agent itself. Outside the numbered deltas, so an app that
+    /// doesn't know it skips it without seeing a gap.
+    ThreadConfig {
+        thread_id: String,
+        options: Vec<ConfigOption>,
     },
     ToolAuthorizationResolved {
         thread_id: String,
@@ -123,6 +134,12 @@ pub enum PhoneMessage {
     },
     Cancel {
         thread_id: String,
+    },
+    SetConfigOption {
+        thread_id: String,
+        config_id: String,
+        /// A select option's `value`, or a boolean for a boolean option.
+        value: serde_json::Value,
     },
     RenameThread {
         thread_id: String,
@@ -225,6 +242,48 @@ pub enum DeltaOp {
     RemoveEntries { start: usize, end: usize },
     Status { status: ThreadStatus },
     Title { title: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConfigOption {
+    pub config_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub category: ConfigCategory,
+    #[serde(flatten)]
+    pub kind: ConfigKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigCategory {
+    Model,
+    ThoughtLevel,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConfigKind {
+    Select {
+        current_value: String,
+        options: Vec<ConfigChoice>,
+    },
+    Boolean {
+        current_value: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConfigChoice {
+    pub value: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The group heading this choice is listed under, when the agent groups
+    /// them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -452,7 +511,9 @@ mod tests {
             DesktopMessage::Hello { protocol_version: 1, lathe_version: "1.13.0".into(), channel: "beta".into(), desktop_name: "Lathe Beta on Mac".into() },
             DesktopMessage::Workspaces { list: vec![WorkspaceSummary { workspace_id: "w".into(), name: "lathe".into(), paths: vec!["/code/lathe".into()], is_open: true, agents: Some(vec![AgentSummary { agent_id: "claude-acp".into(), name: "Claude Code".into() }]), default_agent_id: Some("claude-acp".into()) }] },
             DesktopMessage::Threads { list: vec![ThreadSummary { thread_id: "t".into(), session_id: Some("s".into()), agent_id: "claude-acp".into(), title: "T".into(), workspace_id: "w".into(), updated_at: "2026-10-21T10:00:00+00:00".into(), status: ThreadStatus::Running, needs_attention: false, is_loaded: true }] },
-            DesktopMessage::ThreadSnapshot { thread_id: "t".into(), seq: 0, start_index: 0, entries: entries.clone(), has_more_before: false },
+            DesktopMessage::ThreadSnapshot { thread_id: "t".into(), seq: 0, start_index: 0, entries: entries.clone(), has_more_before: false, config_options: Some(sample_config_options()) },
+            DesktopMessage::ThreadSnapshot { thread_id: "t".into(), seq: 0, start_index: 0, entries: Vec::new(), has_more_before: false, config_options: None },
+            DesktopMessage::ThreadConfig { thread_id: "t".into(), options: sample_config_options() },
             DesktopMessage::ThreadOlder { thread_id: "t".into(), start_index: 0, entries, has_more_before: false },
             DesktopMessage::ThreadDelta { thread_id: "t".into(), seq: 1, op: DeltaOp::RemoveEntries { start: 1, end: 3 } },
             DesktopMessage::ThreadDelta { thread_id: "t".into(), seq: 2, op: DeltaOp::Status { status: ThreadStatus::WaitingAuthorization } },
@@ -471,6 +532,61 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(path, lines).unwrap();
+    }
+
+    fn sample_config_options() -> Vec<ConfigOption> {
+        vec![
+            ConfigOption {
+                config_id: "model".into(),
+                name: "Model".into(),
+                description: None,
+                category: ConfigCategory::Model,
+                kind: ConfigKind::Select {
+                    current_value: "opus".into(),
+                    options: vec![
+                        ConfigChoice { value: "opus".into(), name: "Opus".into(), description: None, group: None },
+                        ConfigChoice { value: "sonnet".into(), name: "Sonnet".into(), description: Some("Faster".into()), group: None },
+                    ],
+                },
+            },
+            ConfigOption {
+                config_id: "effort".into(),
+                name: "Effort".into(),
+                description: None,
+                category: ConfigCategory::ThoughtLevel,
+                kind: ConfigKind::Select {
+                    current_value: "high".into(),
+                    options: vec![ConfigChoice { value: "high".into(), name: "High".into(), description: None, group: None }],
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn config_options_use_the_wire_format() {
+        let option = &sample_config_options()[0];
+        assert_eq!(
+            serde_json::to_value(option).unwrap(),
+            json!({
+                "config_id": "model",
+                "name": "Model",
+                "category": "model",
+                "kind": "select",
+                "current_value": "opus",
+                "options": [
+                    { "value": "opus", "name": "Opus" },
+                    { "value": "sonnet", "name": "Sonnet", "description": "Faster" }
+                ]
+            })
+        );
+        let parsed: PhoneEnvelope = serde_json::from_value(json!({
+            "type": "set_config_option", "client_msg_id": "c1", "thread_id": "t1", "config_id": "effort", "value": "low"
+        }))
+        .unwrap();
+        assert_eq!(
+            parsed.message,
+            PhoneMessage::SetConfigOption { thread_id: "t1".into(), config_id: "effort".into(), value: json!("low") }
+        );
     }
 
     #[test]

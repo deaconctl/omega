@@ -6,7 +6,7 @@ use crate::{
     crypto::encode_url_safe,
     entries,
     protocol::{
-        AgentSummary, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, PROTOCOL_VERSION, PhoneEnvelope,
+        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, PROTOCOL_VERSION, PhoneEnvelope,
         PhoneMessage, ThreadStatus, ThreadSummary, WorkspaceSummary,
     },
 };
@@ -100,6 +100,9 @@ struct Stream {
     flush: Option<Task<()>>,
     /// Both a rename and the agent's own title update report the same title.
     last_title: Option<String>,
+    /// A change reports its options twice: in the reply to the change and as
+    /// the agent's own update.
+    last_config: Option<Vec<ConfigOption>>,
 }
 
 impl Bridge {
@@ -437,6 +440,10 @@ impl Bridge {
                     self.broadcast(&message, cx);
                 }
             }
+            AcpThreadEvent::ConfigOptionsUpdated(options) => {
+                let options = convert_config_options(options);
+                self.send_config(session_id, options, cx);
+            }
             AcpThreadEvent::ElicitationResponded(id) => {
                 let Some(thread_id) = CompanionThreads::thread_id(session_id, cx) else {
                     return;
@@ -507,6 +514,24 @@ impl Bridge {
 
         for op in ops {
             self.send_delta(session_id, op, cx);
+        }
+    }
+
+    fn send_config(&mut self, session_id: &acp::SessionId, options: Vec<ConfigOption>, cx: &mut Context<Self>) {
+        let Some(stream) = self.streams.get_mut(session_id) else {
+            return;
+        };
+        if stream.last_config.as_ref() == Some(&options) {
+            return;
+        }
+        stream.last_config = Some(options.clone());
+        let message = DesktopMessage::ThreadConfig {
+            thread_id: stream.thread_id.clone(),
+            options,
+        };
+        let subscribers = stream.subscribers.iter().cloned().collect::<Vec<_>>();
+        for device_id in subscribers {
+            self.send(&device_id, &message, cx);
         }
     }
 
@@ -606,6 +631,13 @@ impl Bridge {
                 None => Err(not_loaded()),
             },
             PhoneMessage::RenameThread { thread_id, title } => self.rename(&thread_id, &title, cx),
+            PhoneMessage::SetConfigOption { thread_id, config_id, value } => {
+                match self.set_config_option(device_id, &client_msg_id, &thread_id, &config_id, &value, cx) {
+                    // Acked once the agent has applied it.
+                    Ok(()) => return,
+                    Err(error) => Err(error),
+                }
+            }
             PhoneMessage::NewThread { workspace_id, agent_id, text } => {
                 match self.new_thread(device_id, &client_msg_id, &workspace_id, &agent_id, text, cx) {
                     // Acked once the thread has started.
@@ -727,6 +759,7 @@ impl Bridge {
                     subscribers: HashSet::default(),
                     flush: None,
                     last_title,
+                    last_config: None,
                 },
             );
         } else {
@@ -739,12 +772,15 @@ impl Bridge {
         };
         stream.subscribers.insert(device_id.to_string());
         let start_index = page_start(&stream.sent, stream.sent.len());
+        let config_options = phone_config_options(thread.read(cx), cx);
+        stream.last_config = config_options.clone();
         let snapshot = DesktopMessage::ThreadSnapshot {
             thread_id: thread_id.to_string(),
             seq: stream.seq,
             start_index,
             entries: stream.sent[start_index..].to_vec(),
             has_more_before: start_index > 0,
+            config_options,
         };
         self.send(device_id, &snapshot, cx);
         self.send_pending_prompts(device_id, Some(session_id), cx);
@@ -808,6 +844,56 @@ impl Bridge {
         };
         let outcome = SelectedPermissionOutcome::new(acp::PermissionOptionId::new(option_id.to_string()), kind);
         thread.update(cx, |thread, cx| thread.authorize_permission_request(id, outcome, cx));
+        Ok(())
+    }
+
+    /// Changes the model or effort of one thread. Unlike the desk's
+    /// selector, this doesn't make the value the default for new threads.
+    fn set_config_option(
+        &mut self,
+        device_id: &str,
+        client_msg_id: &str,
+        thread_id: &str,
+        config_id: &str,
+        value: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ErrorBody> {
+        let (session_id, thread) = self.live_thread(thread_id, cx).ok_or_else(not_loaded)?;
+        let unavailable = || ErrorBody::new(ErrorCode::BadMessage, "That setting can't be changed from the phone.");
+        let provider = {
+            let thread = thread.read(cx);
+            thread.connection().session_config_options(thread.session_id(), cx)
+        }
+        .ok_or_else(unavailable)?;
+        let option = convert_config_options(&provider.config_options())
+            .into_iter()
+            .find(|option| option.config_id == config_id)
+            .ok_or_else(unavailable)?;
+        let value = config_value(&option, value)?;
+        log::info!("companion: phone {device_id} set {config_id} on thread {thread_id}");
+        let task = provider.set_config_option(acp::SessionConfigId::new(config_id.to_string()), value, cx);
+        let device_id = device_id.to_string();
+        let client_msg_id = client_msg_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| match result {
+                Ok(options) => {
+                    this.send_config(&session_id, convert_config_options(&options), cx);
+                    this.ack(&device_id, &client_msg_id, Ok(()), cx);
+                }
+                Err(error) => {
+                    log::warn!("companion: the agent refused a setting change: {error:#}");
+                    this.ack(
+                        &device_id,
+                        &client_msg_id,
+                        Err(ErrorBody::new(ErrorCode::Internal, format!("The agent didn't accept the change: {error}"))),
+                        cx,
+                    );
+                }
+            })
+            .log_err();
+        })
+        .detach();
         Ok(())
     }
 
@@ -1029,6 +1115,75 @@ fn page_start(entries: &[Entry], end: usize) -> usize {
         start -= 1;
     }
     start
+}
+
+/// The thread's model and effort choices, as the phone sees them. Modes and
+/// anything else stay on the desk: some modes skip permission prompts.
+fn phone_config_options(thread: &AcpThread, cx: &App) -> Option<Vec<ConfigOption>> {
+    let provider = thread.connection().session_config_options(thread.session_id(), cx)?;
+    let options = convert_config_options(&provider.config_options());
+    (!options.is_empty()).then_some(options)
+}
+
+/// Only a value the agent offered is passed on.
+fn config_value(option: &ConfigOption, value: &serde_json::Value) -> Result<acp::SessionConfigOptionValue, ErrorBody> {
+    match (&option.kind, value) {
+        (ConfigKind::Select { options, .. }, serde_json::Value::String(value))
+            if options.iter().any(|choice| &choice.value == value) =>
+        {
+            Ok(acp::SessionConfigOptionValue::id(value.clone()))
+        }
+        (ConfigKind::Boolean { .. }, serde_json::Value::Bool(value)) => Ok(acp::SessionConfigOptionValue::boolean(*value)),
+        _ => Err(ErrorBody::new(ErrorCode::BadMessage, "That choice isn't offered for this thread.")),
+    }
+}
+
+fn convert_config_options(options: &[acp::SessionConfigOption]) -> Vec<ConfigOption> {
+    options
+        .iter()
+        .filter_map(|option| {
+            let category = match option.category.as_ref()? {
+                acp::SessionConfigOptionCategory::Model => ConfigCategory::Model,
+                acp::SessionConfigOptionCategory::ThoughtLevel => ConfigCategory::ThoughtLevel,
+                _ => return None,
+            };
+            let kind = match &option.kind {
+                acp::SessionConfigKind::Select(select) => {
+                    let choice = |choice: &acp::SessionConfigSelectOption, group: Option<&str>| ConfigChoice {
+                        value: choice.value.0.to_string(),
+                        name: choice.name.clone(),
+                        description: choice.description.clone(),
+                        group: group.map(str::to_string),
+                    };
+                    let options = match &select.options {
+                        acp::SessionConfigSelectOptions::Ungrouped(options) => {
+                            options.iter().map(|option| choice(option, None)).collect()
+                        }
+                        acp::SessionConfigSelectOptions::Grouped(groups) => groups
+                            .iter()
+                            .flat_map(|group| group.options.iter().map(|option| choice(option, Some(&group.name))))
+                            .collect(),
+                        _ => return None,
+                    };
+                    ConfigKind::Select {
+                        current_value: select.current_value.0.to_string(),
+                        options,
+                    }
+                }
+                acp::SessionConfigKind::Boolean(boolean) => ConfigKind::Boolean {
+                    current_value: boolean.current_value,
+                },
+                _ => return None,
+            };
+            Some(ConfigOption {
+                config_id: option.config_id.0.to_string(),
+                name: option.name.clone(),
+                description: option.description.clone(),
+                category,
+                kind,
+            })
+        })
+        .collect()
 }
 
 fn not_loaded() -> ErrorBody {
@@ -1576,6 +1731,52 @@ mod tests {
             &json!({ "type": "ack", "client_msg_id": "n1", "ok": true, "thread_id": thread_id.to_key_string() })
         );
         harness.bridge.read_with(cx, |bridge, _| assert!(bridge.pending_new_threads.is_empty()));
+    }
+
+    fn select(id: &str, category: Option<acp::SessionConfigOptionCategory>, values: &[&str]) -> acp::SessionConfigOption {
+        let options = values
+            .iter()
+            .map(|value| acp::SessionConfigSelectOption::new(value.to_string(), value.to_uppercase()))
+            .collect::<Vec<_>>();
+        let mut option = acp::SessionConfigOption::select(id.to_string(), id.to_uppercase(), values[0].to_string(), options);
+        option.category = category;
+        option
+    }
+
+    #[test]
+    fn only_model_and_effort_reach_the_phone() {
+        let options = convert_config_options(&[
+            select("model", Some(acp::SessionConfigOptionCategory::Model), &["opus", "sonnet"]),
+            select("effort", Some(acp::SessionConfigOptionCategory::ThoughtLevel), &["low", "high"]),
+            // Some modes skip permission prompts, so they stay on the desk.
+            select("mode", Some(acp::SessionConfigOptionCategory::Mode), &["default", "bypassPermissions"]),
+            select("uncategorized", None, &["a"]),
+        ]);
+        assert_eq!(
+            options.iter().map(|option| option.config_id.as_str()).collect::<Vec<_>>(),
+            ["model", "effort"]
+        );
+        assert_eq!(options[1].category, ConfigCategory::ThoughtLevel);
+        assert_eq!(
+            options[0].kind,
+            ConfigKind::Select {
+                current_value: "opus".into(),
+                options: vec![
+                    ConfigChoice { value: "opus".into(), name: "OPUS".into(), description: None, group: None },
+                    ConfigChoice { value: "sonnet".into(), name: "SONNET".into(), description: None, group: None },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn only_offered_values_are_passed_on() {
+        let options = convert_config_options(&[select("effort", Some(acp::SessionConfigOptionCategory::ThoughtLevel), &["low", "high"])]);
+        let effort = &options[0];
+        assert_eq!(config_value(effort, &json!("high")).ok(), Some(acp::SessionConfigOptionValue::id("high")));
+        assert!(config_value(effort, &json!("max")).is_err());
+        assert!(config_value(effort, &json!(true)).is_err());
+        assert!(config_value(effort, &json!(null)).is_err());
     }
 
     #[test]

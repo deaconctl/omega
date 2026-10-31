@@ -1,9 +1,7 @@
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
 use crate::persistence::model::DockData;
 use crate::status_bar::HideStatusItem;
-use crate::{
-    DraggedDock, Event, FloatingLayout, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings,
-};
+use crate::{DraggedDock, Event, FloatingLayout, ModalLayer, Pane, WorkspaceSettings};
 use crate::{Workspace, status_bar::StatusItemView};
 use anyhow::Context as _;
 use client::proto;
@@ -321,7 +319,6 @@ pub struct Dock {
     is_open: bool,
     active_panel_index: Option<usize>,
     focus_handle: FocusHandle,
-    focus_follows_mouse: FocusFollowsMouse,
     restoration: DockRestoreState,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
@@ -505,7 +502,6 @@ impl Dock {
                 active_panel_index: None,
                 is_open: false,
                 focus_handle: focus_handle.clone(),
-                focus_follows_mouse: WorkspaceSettings::get_global(cx).focus_follows_mouse,
                 _subscriptions: [focus_subscription, zoom_subscription],
                 restoration: DockRestoreState::Restoring { pending: None },
                 zoom_layer_open: false,
@@ -1034,6 +1030,14 @@ impl Dock {
         }
     }
 
+    /// Panel buttons focus this before dispatching their action. A zoomed panel isn't rendered
+    /// inside its dock, so the dock's own handle would be outside the frame and the action dropped.
+    pub(crate) fn panel_button_focus_handle(&self, window: &Window, cx: &App) -> FocusHandle {
+        self.zoomed_panel(window, cx)
+            .map(|panel| panel.panel_focus_handle(cx))
+            .unwrap_or_else(|| self.focus_handle.clone())
+    }
+
     pub fn active_panel_size(&self) -> Option<PanelSizeState> {
         if self.is_open {
             self.active_panel_entry().map(|entry| entry.size_state)
@@ -1262,8 +1266,8 @@ impl Dock {
         }
     }
 
-    fn dispatch_context() -> KeyContext {
-        let mut dispatch_context = KeyContext::new_with_defaults();
+    fn dispatch_context(cx: &App) -> KeyContext {
+        let mut dispatch_context = KeyContext::new_with_defaults(cx.platform_info().os);
         dispatch_context.add("Dock");
 
         dispatch_context
@@ -1406,7 +1410,7 @@ impl Dock {
 
 impl Render for Dock {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dispatch_context = Self::dispatch_context();
+        let dispatch_context = Self::dispatch_context(cx);
         if let Some(active_view) = self.visible_entry().map(|entry| entry.panel.to_any()) {
             let panels = self.render_panels(active_view, cx);
             let position = self.position;
@@ -1475,7 +1479,7 @@ impl Render for Dock {
                 .id("dock-panel")
                 .key_context(dispatch_context)
                 .track_focus(&self.focus_handle(cx))
-                .focus_follows_mouse(self.focus_follows_mouse, cx)
+                .focus_follows_mouse(WorkspaceSettings::get_global(cx).focus_follows_mouse, cx)
                 .flex()
                 .relative()
                 .bg(cx.theme().colors().panel_background)
@@ -1607,7 +1611,7 @@ impl Render for PanelButtons {
                     (action, icon_tooltip.into())
                 };
 
-                let focus_handle = dock.focus_handle(cx);
+                let focus_handle = dock.panel_button_focus_handle(window, cx);
                 let icon_label = entry.panel.icon_label(window, cx);
 
                 Some(
@@ -1817,7 +1821,7 @@ impl Render for PanelButtons {
                                             return;
                                         }
                                         if can_open_in_split
-                                            && !event.modifiers().secondary()
+                                            && !event.modifiers().secondary(cx)
                                             && dock.update(cx, |dock, cx| {
                                                 dock.reopen_in_stack(i, window, cx)
                                             })
@@ -1828,7 +1832,7 @@ impl Render for PanelButtons {
                                             }
                                             return;
                                         }
-                                        if can_open_in_split && event.modifiers().secondary() {
+                                        if can_open_in_split && event.modifiers().secondary(cx) {
                                             dock.update(cx, |dock, cx| {
                                                 dock.open_split(i, window, cx)
                                             });

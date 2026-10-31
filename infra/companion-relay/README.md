@@ -83,6 +83,10 @@ With it set, every device counts as subscribed. `npx wrangler dev` then works wi
 
 Anyone can deploy this Worker to their own Cloudflare account and point Lathe at it with the `companion.relay_url` setting. Remove the `[[routes]]` block to use the `workers.dev` address instead of a custom domain. A self-hosted relay that doesn't sell subscriptions should set `REVENUECAT_DISABLED` as a secret (`npx wrangler secret put REVENUECAT_DISABLED`, value `1`).
 
+## Pairing link page
+
+`GET /pair` serves the page behind Lathe's "Copy link". Android's Messages app doesn't make `lathe-companion://` links tappable and Chrome won't open one typed into its address bar, but both open an https link. Lathe copies `https://<relay host>/pair#<the QR code's query>`, and the page turns the fragment back into the app link: an `intent://` link on Android, `lathe-companion://` elsewhere. Browsers never send the fragment to the server, so the pairing token stays out of the relay's logs. The page loads nothing from outside and isn't cached.
+
 ## Protocol
 
 The canonical spec is `src/protocol/README.md` in the `lathe-companion-app` repo. This section covers what the relay itself does, including the desktop-only messages the app doesn't see.

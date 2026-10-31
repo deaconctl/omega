@@ -2,7 +2,7 @@
 description = "The fast, collaborative code editor."
 edition.workspace = true
 name = "zed"
-version = "1.14.0"
+version = "1.15.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zed Team <hi@zed.dev>"]
@@ -59,7 +59,7 @@ name = "zed"
 path = "src/main.rs"
 
 [[bin]]
-name = "zed_visual_test_runner"
+name = "zed-visual-test-runner"
 path = "src/visual_test_runner.rs"
 required-features = ["visual-tests"]
 
@@ -295,7 +295,7 @@ icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
 identifier = "dev.omega.omega-Dev"
 name = "Omega Dev"
 category = "Developer Tool"
-osx_minimum_system_version = "10.15.7"
+osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["lathe"]
 
@@ -304,7 +304,7 @@ icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
 identifier = "dev.omega.omega-Nightly"
 name = "Omega Nightly"
 category = "Developer Tool"
-osx_minimum_system_version = "10.15.7"
+osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["lathe"]
 
@@ -313,7 +313,7 @@ icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
 identifier = "dev.omega.omega-Preview"
 name = "Omega Preview"
 category = "Developer Tool"
-osx_minimum_system_version = "10.15.7"
+osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["lathe"]
 
@@ -331,7 +331,7 @@ icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
 identifier = "dev.omega.omega"
 name = "Omega"
 category = "Developer Tool"
-osx_minimum_system_version = "10.15.7"
+osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["lathe"]
 

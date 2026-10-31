@@ -16,8 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Select Xcode 16
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+      # Upstream builds against the macOS 26 SDK since #65994.
+      - name: Select Xcode 26
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)
+          if [ -z "$xcode" ]; then
+            echo "No Xcode 26 on this runner" >&2
+            exit 1
+          fi
+          sudo xcode-select -s "$xcode/Contents/Developer"
+          xcodebuild -version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -96,8 +104,8 @@ jobs:
         run: |
           triple=$(rustc --version --verbose | sed -n 's/^host: //p')
           cargo build --release --package remote_server --target "$triple"
-          strip -x "target/$triple/release/remote_server"
-          gzip -f --stdout --best "target/$triple/release/remote_server" \
+          strip -x "target/$triple/release/remote-server"
+          gzip -f --stdout --best "target/$triple/release/remote-server" \
             > target/release/lathe-remote-server-macos-aarch64.gz
 
       - name: Verify signing identity
@@ -202,13 +210,12 @@ jobs:
       - name: Validate Apple Event handler symbols are present
         # Regression guard for the kAEOpenDocuments fix. If the handler or
         # its registration selector disappears from the binary, Finder's
-        # "Open With" breaks silently at runtime.
+        # "Open With" breaks silently at runtime. URLs arrive through
+        # `application:openURLs:`, which has no Apple Event handler to check.
         run: |
           BIN="$APP/Contents/MacOS/zed"
           strings "$BIN" | grep -q 'handleOpenDocumentsEvent:withReplyEvent:' \
             || { echo "MISSING selector: handleOpenDocumentsEvent:withReplyEvent:"; exit 1; }
-          strings "$BIN" | grep -q 'handleGetURLEvent:withReplyEvent:' \
-            || { echo "MISSING selector: handleGetURLEvent:withReplyEvent:"; exit 1; }
           echo "  ok: Apple Event handler selectors present"
 
       - name: Validate code signature
@@ -374,8 +381,8 @@ jobs:
         run: |
           triple=$(rustc --version --verbose | sed -n 's/^host: //p')
           cargo build --release --package remote_server --target "$triple"
-          strip "target/$triple/release/remote_server"
-          gzip -f --stdout --best "target/$triple/release/remote_server" \
+          strip "target/$triple/release/remote-server"
+          gzip -f --stdout --best "target/$triple/release/remote-server" \
             > "target/release/lathe-remote-server-linux-${{ matrix.arch }}.gz"
 
       - name: Install appimagetool

@@ -949,7 +949,7 @@
     //    "files_first"
     "sort_mode": "directories_first",
     // Whether to sort file and folder names case-sensitively in the project panel.
-    // This setting can take four values:
+    // This setting can take five values:
     //
     // 1. Case-insensitive natural sort with lowercase preferred in ties (default):
     //    "default"
@@ -962,6 +962,10 @@
     // 4. Pure Unicode codepoint comparison.
     //    No case folding, no natural number sorting:
     //    "unicode"
+    // 5. Files are grouped by extension, with extensionless files (including
+    //    dotfiles such as ".gitignore") first and natural sort by name within
+    //    each group:
+    //    "extension"
     "sort_order": "default",
     // Whether to show error and warning count badges next to file names in the project panel.
     "diagnostic_badges": false,
@@ -1912,6 +1916,14 @@
     //
     // Trailing slashes are ignored.
     "worktree_directory": "../worktrees",
+    // Settings for automatically fetching the default branch's remote and the current branch's upstream remote.
+    "auto_fetch": {
+      // Whether to automatically fetch in the background.
+      "enabled": false,
+      // How long to wait between automatic fetches, in seconds.
+      // Only applies when auto fetch is enabled. (min: 15)
+      "interval_secs": 60,
+    },
   },
   // The list of custom Git hosting providers.
   "git_hosting_providers": [
@@ -2025,7 +2037,7 @@
   // Whether to reveal an already open file in an existing pane instead of
   // opening it in the active pane.
   "reveal_if_open": false,
-  // What to show when opening a new window. Values: empty_tab, launchpad
+  // What to show when opening a new window. Values: empty_tab, launchpad, readme
   "on_new_window": "launchpad",
   "status_bar": {
     // Whether to show the status bar.
