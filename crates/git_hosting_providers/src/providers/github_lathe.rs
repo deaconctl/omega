@@ -540,13 +540,45 @@ pub(super) async fn github_send(
         .into());
     }
     if !response.status().is_success() {
-        let text = String::from_utf8_lossy(&bytes);
         bail!(
-            "{context} failed ({}): {text:?}",
-            response.status().as_u16()
+            "{context} failed ({}): {}",
+            response.status().as_u16(),
+            github_error_message(&bytes)
         );
     }
     Ok(bytes)
+}
+
+/// GitHub's top-level `message` on a 422 is just "Validation Failed"; the
+/// actionable reason (e.g. "No commits between main and feature") lives in
+/// `errors[].message`, so prefer those and fall back to the raw body.
+fn github_error_message(bytes: &[u8]) -> String {
+    #[derive(Deserialize)]
+    struct GithubErrorBody {
+        message: Option<String>,
+        #[serde(default)]
+        errors: Vec<GithubErrorDetail>,
+    }
+    #[derive(Deserialize)]
+    struct GithubErrorDetail {
+        message: Option<String>,
+    }
+
+    let Ok(body) = serde_json::from_slice::<GithubErrorBody>(bytes) else {
+        return String::from_utf8_lossy(bytes).into_owned();
+    };
+    let details = body
+        .errors
+        .into_iter()
+        .filter_map(|error| error.message)
+        .collect::<Vec<_>>();
+    if !details.is_empty() {
+        details.join("; ")
+    } else if let Some(message) = body.message {
+        message
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
 }
 
 /// Maps a [`PullRequestListFilter`] to GitHub's single-valued `state` query
@@ -731,6 +763,9 @@ pub(super) struct GithubReviewComment {
     path: Option<String>,
     #[serde(default)]
     line: Option<u32>,
+    /// `LEFT` when `line` is in the original file, `RIGHT` in the changed one.
+    #[serde(default)]
+    side: Option<String>,
     /// Present on replies; references the top-level comment of the thread.
     #[serde(default)]
     in_reply_to_id: Option<u64>,
@@ -750,6 +785,11 @@ impl GithubReviewComment {
             body: self.body.into(),
             path: self.path.unwrap_or_default().into(),
             line: self.line,
+            side: self.line.and(match self.side.as_deref() {
+                Some("LEFT") => Some(DiffCommentSide::Left),
+                Some("RIGHT") => Some(DiffCommentSide::Right),
+                _ => None,
+            }),
             parent_id: self.in_reply_to_id,
             // GitHub's REST review-comment API does not report thread resolution.
             is_resolved: false,
@@ -853,6 +893,20 @@ mod tests {
             error.downcast_ref::<PullRequestAuthError>().is_none(),
             "non-401 failures should not be treated as an auth error"
         );
+    }
+
+    #[test]
+    fn test_github_error_message_prefers_validation_details() {
+        let body = br#"{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"No commits between main and feature"}],"status":"422"}"#;
+        assert_eq!(
+            github_error_message(body),
+            "No commits between main and feature"
+        );
+        assert_eq!(
+            github_error_message(br#"{"message":"Not Found"}"#),
+            "Not Found"
+        );
+        assert_eq!(github_error_message(b"boom"), "boom");
     }
 
     #[test]
@@ -972,11 +1026,13 @@ mod tests {
             "body": "Nit: rename this",
             "path": "src/main.rs",
             "line": 120,
+            "side": "LEFT",
             "created_at": "2026-01-04T05:06:07Z",
             "html_url": "https://github.com/owner/repo/pull/7#discussion_r9001"
         }"#;
         let comment: GithubReviewComment = serde_json::from_str(json).unwrap();
         let mapped = comment.into_comment().unwrap();
+        assert_eq!(mapped.side, Some(DiffCommentSide::Left));
 
         assert_eq!(mapped.id, 9001);
         assert_eq!(mapped.author_login.to_string(), "reviewer");

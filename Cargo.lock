@@ -10048,6 +10048,7 @@ dependencies = [
  "agent-client-protocol",
  "agent_ui",
  "anyhow",
+ "async-trait",
  "async-tungstenite",
  "base64 0.22.1",
  "chrono",
@@ -10057,14 +10058,17 @@ dependencies = [
  "ed25519-dalek",
  "fs",
  "futures 0.3.34",
+ "git",
  "gpui",
  "gpui_tokio",
+ "http_client",
  "http_client_tls",
  "language",
  "lathe_hooks",
  "libc",
  "log",
  "menu",
+ "pr_ui",
  "pretty_assertions",
  "project",
  "qrcodegen",
@@ -10075,6 +10079,8 @@ dependencies = [
  "serde_json",
  "settings",
  "sha2",
+ "terminal",
+ "terminal_view",
  "tokio",
  "ui",
  "url",
@@ -22842,7 +22848,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "1.15.0"
+version = "1.18.0"
 dependencies = [
  "acp_thread",
  "acp_tools",

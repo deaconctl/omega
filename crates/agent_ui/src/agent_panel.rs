@@ -1657,6 +1657,10 @@ impl AgentPanel {
         &self.prompt_store
     }
 
+    pub(crate) fn workspace(&self) -> &WeakEntity<Workspace> {
+        &self.workspace
+    }
+
     pub(crate) fn project_entity_id(&self) -> gpui::EntityId {
         self.project.entity_id()
     }
@@ -4028,6 +4032,39 @@ impl AgentPanel {
             VisibleSurface::AgentThread(conversation_view) => Some(conversation_view),
             _ => None,
         }
+    }
+
+    /// The panel's terminal threads with the titles it shows for them, for
+    /// Lathe Companion.
+    pub fn terminal_threads(&self, cx: &App) -> Vec<(Entity<TerminalView>, SharedString)> {
+        self.terminals
+            .values()
+            .map(|terminal| {
+                let title = terminal
+                    .custom_title(cx)
+                    .unwrap_or_else(|| terminal.terminal_title(cx));
+                (terminal.view.clone(), title)
+            })
+            .collect()
+    }
+
+    /// Renames the terminal thread showing `view`, as renaming it in the
+    /// panel does. False when no thread here shows it.
+    pub fn rename_terminal_thread(
+        &mut self,
+        view: &Entity<TerminalView>,
+        title: SharedString,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(terminal_id) = self
+            .terminals
+            .iter()
+            .find(|(_, terminal)| &terminal.view == view)
+            .map(|(terminal_id, _)| *terminal_id)
+        else {
+            return false;
+        };
+        self.rename_terminal(terminal_id, title, cx)
     }
 
     pub fn visible_terminal_view(&self) -> Option<&Entity<TerminalView>> {

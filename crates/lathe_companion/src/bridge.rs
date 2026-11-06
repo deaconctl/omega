@@ -5,8 +5,9 @@ use crate::{
     Companion, CompanionEvent, CompanionSettings, CompanionThreads, CompanionThreadsEvent,
     crypto::encode_url_safe,
     entries,
+    terminals::{Terminals, TerminalsEvent},
     protocol::{
-        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, PROTOCOL_VERSION, PhoneEnvelope,
+        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, FEATURE_CLOSE_THREADS, FEATURE_PULL_REQUESTS, FEATURE_TERMINALS, PROTOCOL_VERSION, PhoneEnvelope,
         PhoneMessage, ThreadStatus, ThreadSummary, WorkspaceSummary,
     },
 };
@@ -38,6 +39,11 @@ const MAX_LISTED_THREADS: usize = 100;
 /// relay traffic to about ten frames a second per thread.
 const ENTRY_FLUSH_DELAY: Duration = Duration::from_millis(100);
 const LIST_FLUSH_DELAY: Duration = Duration::from_millis(500);
+/// Entries at the end of a thread compared on every flush, whether or not an
+/// event marked them. Lathe reveals streamed agent text gradually, appending to
+/// the message after the update that brought it, and that reveal raises no
+/// event of its own.
+const TAIL_ENTRIES: usize = 2;
 const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
 /// External agents launch a process before their first turn.
 const NEW_THREAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -69,6 +75,9 @@ pub(crate) struct Bridge {
     seen_messages: HashMap<String, VecDeque<String>>,
     pending_loads: HashMap<acp::SessionId, Vec<PendingSubscribe>>,
     pending_new_threads: HashMap<ThreadId, PendingNewThread>,
+    terminals: Option<Entity<Terminals>>,
+    /// The phones following each terminal's screen.
+    terminal_subscribers: HashMap<String, HashSet<String>>,
     list_flush: Option<Task<()>>,
     keep_awake: Option<keep_awake::Assertion>,
     _subscriptions: Vec<Subscription>,
@@ -121,6 +130,12 @@ impl Bridge {
         if let Some(store) = ThreadMetadataStore::try_global(cx) {
             subscriptions.push(cx.observe(&store, |this, _, cx| this.complete_new_threads(cx)));
         }
+        let terminals = Terminals::global(cx);
+        if let Some(terminals) = &terminals {
+            subscriptions.push(cx.subscribe(terminals, |this, _, event, cx| {
+                this.handle_terminals_event(event, cx)
+            }));
+        }
         let mut this = Self {
             companion,
             threads,
@@ -130,6 +145,8 @@ impl Bridge {
             seen_messages: HashMap::default(),
             pending_loads: HashMap::default(),
             pending_new_threads: HashMap::default(),
+            terminals,
+            terminal_subscribers: HashMap::default(),
             list_flush: None,
             keep_awake: None,
             _subscriptions: subscriptions,
@@ -197,7 +214,7 @@ impl Bridge {
         match event {
             CompanionEvent::DeviceOnline(device_id) => self.greet(device_id, cx),
             CompanionEvent::DeviceOffline(device_id) | CompanionEvent::DeviceRemoved(device_id) => {
-                self.forget_device(device_id)
+                self.forget_device(device_id, cx)
             }
             CompanionEvent::PhoneMessage { device_id, message } => {
                 self.handle_phone_message(device_id, message, cx)
@@ -213,20 +230,94 @@ impl Bridge {
             lathe_version: release_channel::AppVersion::global(cx).to_string(),
             channel: channel.dev_name().to_string(),
             desktop_name: crate::companion::desktop_name(channel),
+            features: vec![
+                FEATURE_PULL_REQUESTS.to_string(),
+                FEATURE_CLOSE_THREADS.to_string(),
+                FEATURE_TERMINALS.to_string(),
+            ],
         };
         self.send(device_id, &hello, cx);
         self.send_lists(device_id, cx);
+        self.send_terminals(device_id, cx);
         self.send_pending_prompts(device_id, None, cx);
     }
 
-    fn forget_device(&mut self, device_id: &str) {
+    fn forget_device(&mut self, device_id: &str, cx: &mut Context<Self>) {
         self.seen_messages.remove(device_id);
         self.streams.retain(|_, stream| {
             stream.subscribers.remove(device_id);
             !stream.subscribers.is_empty()
         });
+        let watched = self.terminal_subscribers.keys().cloned().collect::<Vec<_>>();
+        for terminal_id in watched {
+            self.unfollow_terminal(device_id, &terminal_id, cx);
+        }
         // Pending loads stay: a phone that drops and reconnects while its
         // thread loads still gets the answer, and the timeout clears the rest.
+    }
+
+    fn send_terminals(&self, device_id: &str, cx: &mut Context<Self>) {
+        let Some(terminals) = &self.terminals else {
+            return;
+        };
+        let list = terminals.read(cx).list(cx);
+        let input_enabled = CompanionSettings::get_global(cx).terminal_input;
+        self.send(device_id, &DesktopMessage::Terminals { list, input_enabled }, cx);
+    }
+
+    fn handle_terminals_event(&mut self, event: &TerminalsEvent, cx: &mut Context<Self>) {
+        match event {
+            TerminalsEvent::ListChanged => {
+                for device_id in self.online_devices(cx) {
+                    self.send_terminals(&device_id, cx);
+                }
+            }
+            TerminalsEvent::Screen { terminal_id, message } => {
+                let subscribers = self
+                    .terminal_subscribers
+                    .get(terminal_id)
+                    .map(|devices| devices.iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                for device_id in subscribers {
+                    self.send(&device_id, message, cx);
+                }
+            }
+            TerminalsEvent::AwaitingInput { terminal_id } => {
+                // Someone following the terminal on a phone already sees it.
+                if self.terminal_subscribers.contains_key(terminal_id) {
+                    return;
+                }
+                self.companion.read(cx).push_terminal(terminal_id);
+            }
+        }
+    }
+
+    fn follow_terminal(&mut self, device_id: &str, terminal_id: &str, cx: &mut Context<Self>) -> Result<(), ErrorBody> {
+        let terminals = self.terminals.clone().ok_or_else(|| {
+            ErrorBody::new(ErrorCode::TerminalNotFound, "That terminal closed.")
+        })?;
+        self.terminal_subscribers
+            .entry(terminal_id.to_string())
+            .or_default()
+            .insert(device_id.to_string());
+        let result = terminals.update(cx, |terminals, cx| terminals.watch(terminal_id, cx));
+        if result.is_err() {
+            self.unfollow_terminal(device_id, terminal_id, cx);
+        }
+        result
+    }
+
+    fn unfollow_terminal(&mut self, device_id: &str, terminal_id: &str, cx: &mut Context<Self>) {
+        let Some(devices) = self.terminal_subscribers.get_mut(terminal_id) else {
+            return;
+        };
+        devices.remove(device_id);
+        if devices.is_empty() {
+            self.terminal_subscribers.remove(terminal_id);
+            if let Some(terminals) = &self.terminals {
+                terminals.update(cx, |terminals, _| terminals.unwatch(terminal_id));
+            }
+        }
     }
 
     fn send_lists(&self, device_id: &str, cx: &mut Context<Self>) {
@@ -486,6 +577,8 @@ impl Bridge {
         let thread = thread.read(cx);
         let current = thread.entries();
         let mut ops = Vec::new();
+        let tail_start = current.len().saturating_sub(TAIL_ENTRIES);
+        stream.dirty.extend(tail_start..current.len().min(stream.sent.len()));
 
         if let Some(from) = stream.removed_from.take()
             && from < stream.sent.len()
@@ -511,9 +604,18 @@ impl Bridge {
             stream.sent.push(entry.clone());
             ops.push(DeltaOp::NewEntry { entry });
         }
+        // Keep looking while the agent works or its text is still being
+        // revealed (which can run past the turn's last event), and once more
+        // after anything changed.
+        let keep_looking = !ops.is_empty()
+            || thread.is_revealing_text()
+            || thread.foreground_activity().is_active();
 
         for op in ops {
             self.send_delta(session_id, op, cx);
+        }
+        if keep_looking {
+            self.mark_dirty(session_id, |_| {}, cx);
         }
     }
 
@@ -611,6 +713,7 @@ impl Bridge {
             PhoneMessage::Refresh {} => {
                 self.send_lists(device_id, cx);
                 self.send_pending_prompts(device_id, None, cx);
+                self.send_terminals(device_id, cx);
                 Ok(())
             }
             PhoneMessage::LoadOlder { thread_id, before_index } => {
@@ -631,6 +734,7 @@ impl Bridge {
                 None => Err(not_loaded()),
             },
             PhoneMessage::RenameThread { thread_id, title } => self.rename(&thread_id, &title, cx),
+            PhoneMessage::CloseThreads { thread_ids } => self.close_threads(&thread_ids, cx),
             PhoneMessage::SetConfigOption { thread_id, config_id, value } => {
                 match self.set_config_option(device_id, &client_msg_id, &thread_id, &config_id, &value, cx) {
                     // Acked once the agent has applied it.
@@ -645,6 +749,55 @@ impl Bridge {
                     Err(error) => Err(error),
                 }
             }
+            message @ (PhoneMessage::ListPullRequests { .. }
+            | PhoneMessage::GetPullRequest { .. }
+            | PhoneMessage::GetPullRequestDiff { .. }
+            | PhoneMessage::SubmitReview { .. }
+            | PhoneMessage::ReplyReviewComment { .. }
+            | PhoneMessage::CreateReviewComment { .. }) => {
+                // Acked once the host has answered, after any replies.
+                let task = crate::pull_requests::handle(message, cx);
+                let device_id = device_id.to_string();
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    this.update(cx, |this, cx| {
+                        let result = result.map(|messages| {
+                            for message in &messages {
+                                this.send(&device_id, message, cx);
+                            }
+                        });
+                        this.ack(&device_id, &client_msg_id, result, cx);
+                    })
+                    .log_err();
+                })
+                .detach();
+                return;
+            }
+            PhoneMessage::SubscribeTerminal { terminal_id } => {
+                self.follow_terminal(device_id, &terminal_id, cx)
+            }
+            PhoneMessage::UnsubscribeTerminal { terminal_id } => {
+                self.unfollow_terminal(device_id, &terminal_id, cx);
+                Ok(())
+            }
+            PhoneMessage::RenameTerminal { terminal_id, title } => {
+                let title = title.trim();
+                if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
+                    Err(ErrorBody::new(
+                        ErrorCode::BadMessage,
+                        format!("A terminal name has to be 1 to {MAX_TITLE_CHARS} characters."),
+                    ))
+                } else {
+                    match &self.terminals {
+                        Some(terminals) => terminals.update(cx, |terminals, cx| terminals.rename(&terminal_id, title, cx)),
+                        None => Err(ErrorBody::new(ErrorCode::TerminalNotFound, "That terminal closed.")),
+                    }
+                }
+            }
+            PhoneMessage::TerminalInput { terminal_id, text, key } => match &self.terminals {
+                Some(terminals) => terminals.update(cx, |terminals, cx| terminals.input(&terminal_id, text, key, cx)),
+                None => Err(ErrorBody::new(ErrorCode::TerminalNotFound, "That terminal closed.")),
+            },
             PhoneMessage::Unpair {} => {
                 self.ack(device_id, &client_msg_id, Ok(()), cx);
                 let device_id = device_id.to_string();
@@ -764,7 +917,13 @@ impl Bridge {
             );
         } else {
             // Bring the cache up to date so this phone's snapshot matches the
-            // deltas the others are about to get.
+            // deltas the others are about to get. Every entry is compared, not
+            // just the marked ones, so a resubscribe (the phone's Refresh) also
+            // repairs anything the cache missed.
+            if let Some(stream) = self.streams.get_mut(session_id) {
+                let sent = stream.sent.len();
+                stream.dirty.extend(0..sent);
+            }
             self.flush_entries(session_id, cx);
         }
         let Some(stream) = self.streams.get_mut(session_id) else {
@@ -1004,6 +1163,32 @@ impl Bridge {
     /// Renames the thread the way the sidebar does: through the thread's view
     /// wherever one is open, which also updates its title editor and saves the
     /// rename, and straight to the saved title otherwise.
+    /// Archives the threads the way Lathe's archive view does: only the thread
+    /// is put away. Unlike archiving from the sidebar, no worktree or workspace
+    /// is removed, which a phone can't see to confirm. Threads already gone are
+    /// skipped, so a repeat after a reconnect is harmless.
+    fn close_threads(&mut self, thread_ids: &[String], cx: &mut Context<Self>) -> Result<(), ErrorBody> {
+        if thread_ids.is_empty() || thread_ids.len() > MAX_LISTED_THREADS {
+            return Err(ErrorBody::new(ErrorCode::BadMessage, "Pick between 1 and 100 threads to close."));
+        }
+        let store = ThreadMetadataStore::try_global(cx)
+            .ok_or_else(|| ErrorBody::new(ErrorCode::Internal, "Lathe's thread list isn't available."))?;
+        let ids = thread_ids
+            .iter()
+            .filter_map(|thread_id| self.thread_metadata(thread_id, cx))
+            .filter(|metadata| !metadata.archived)
+            .map(|metadata| metadata.thread_id)
+            .collect::<Vec<_>>();
+        log::info!("companion: phone closed {} thread(s)", ids.len());
+        store.update(cx, |store, cx| {
+            for thread_id in ids {
+                store.archive(thread_id, None, cx);
+            }
+        });
+        self.schedule_list_flush(cx);
+        Ok(())
+    }
+
     fn rename(&mut self, thread_id: &str, title: &str, cx: &mut Context<Self>) -> Result<(), ErrorBody> {
         let title = title.trim();
         if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
@@ -1192,7 +1377,7 @@ fn not_loaded() -> ErrorBody {
 
 /// Stable id for a set of project folders, so a workspace keeps its id across
 /// Lathe restarts.
-fn workspace_id(paths: &PathList) -> String {
+pub(crate) fn workspace_id(paths: &PathList) -> String {
     let mut hasher = Sha256::new();
     for path in paths.ordered_paths() {
         hasher.update(path.to_string_lossy().as_bytes());
@@ -1213,7 +1398,7 @@ fn workspace_name(paths: &PathList) -> String {
     }
 }
 
-fn open_workspace_paths(cx: &App) -> Vec<(PathList, WeakEntity<workspace::Workspace>, gpui::WindowHandle<MultiWorkspace>)> {
+pub(crate) fn open_workspace_paths(cx: &App) -> Vec<(PathList, WeakEntity<workspace::Workspace>, gpui::WindowHandle<MultiWorkspace>)> {
     cx.windows()
         .into_iter()
         .filter_map(|window| window.downcast::<MultiWorkspace>())
@@ -1238,6 +1423,14 @@ fn open_workspace_paths(cx: &App) -> Vec<(PathList, WeakEntity<workspace::Worksp
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// The open workspace with this id, if any window shows it.
+pub(crate) fn open_workspace(workspace_id: &str, cx: &App) -> Option<Entity<workspace::Workspace>> {
+    open_workspace_paths(cx)
+        .into_iter()
+        .find(|(paths, _, _)| self::workspace_id(paths) == workspace_id)
+        .and_then(|(_, workspace, _)| workspace.upgrade())
 }
 
 /// The external agents a new thread from the phone can use in this
@@ -1456,6 +1649,124 @@ mod tests {
         messages.iter().filter(|message| message["type"] == kind).collect()
     }
 
+    /// Lathe reveals streamed agent text gradually, appending to the message
+    /// after the update that brought it, without an event. The phone must still
+    /// end up with all of it, and a resubscribe (Refresh) must repair a cache
+    /// that missed some.
+    #[gpui::test]
+    async fn text_revealed_without_an_event_reaches_the_phone(cx: &mut TestAppContext) {
+        let (companion, outgoing, identity) = connected_companion(cx);
+        cx.update(|cx| {
+            crate::tests::enable_companion_for_test(cx);
+            crate::init_threads(cx);
+            ThreadMetadataStore::init_global(cx);
+            release_channel::init_test(semver::Version::new(1, 2, 3), ReleaseChannel::Dev, cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+
+        let connection = Rc::new(StubAgentConnection::new());
+        let folders = PathList::new(&[Path::new(path!("/test"))]);
+        let thread = cx
+            .update(|cx| connection.clone().new_session(project, folders.clone(), cx))
+            .await
+            .unwrap();
+        let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread_id = ThreadId::new();
+        // The store reloads from disk on startup, which would replace a thread
+        // saved before the reload finishes.
+        cx.update(|cx| ThreadMetadataStore::global(cx).read(cx).reload_task()).await;
+        cx.update(|cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    ThreadMetadata {
+                        thread_id,
+                        session_id: Some(session_id.clone()),
+                        agent_id: project::AgentId("claude-acp".into()),
+                        title: Some("Fix the relay".into()),
+                        title_override: None,
+                        updated_at: chrono::Utc::now(),
+                        created_at: None,
+                        interacted_at: None,
+                        workspace_id: None,
+                        worktree_paths: WorktreePaths::from_folder_paths(&folders),
+                        remote_connection: None,
+                        archived: false,
+                    },
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+
+        let threads = cx.update(|cx| CompanionThreads::global(cx).unwrap());
+        let bridge = cx.new(|cx| Bridge::new(companion.clone(), threads, cx));
+        let phone = FakePhone::new();
+        add_paired(&companion, &phone, cx);
+        let mut harness = Harness { bridge, companion, outgoing, identity, phone, seq: 0 };
+        drain(&mut harness.outgoing);
+
+        let device_id = harness.phone.device_id();
+        harness.companion.update(cx, |companion, cx| {
+            companion.handle_relay_message(json!({ "type": "presence", "device_id": device_id, "online": true }), cx)
+        });
+        cx.run_until_parked();
+        let thread_key = thread_id.to_key_string();
+        harness.say(json!({ "type": "subscribe", "client_msg_id": "m1", "thread_id": thread_key }), cx);
+        drain(&mut harness.outgoing);
+
+        // A message long enough that Lathe reveals it over several flushes.
+        let full = "Hello, this reply is revealed a little at a time, the way Lathe streams agent text.";
+        connection.set_next_prompt_updates(vec![acp_v1::SessionUpdate::AgentMessageChunk(
+            acp_v1::ContentChunk::new(full.into()),
+        )]);
+        harness.say(json!({ "type": "send_message", "client_msg_id": "m2", "thread_id": thread_key, "text": "Hi" }), cx);
+        let last_text = |messages: &[Value]| {
+            messages
+                .iter()
+                .rev()
+                .find_map(|message| match message["type"].as_str() {
+                    Some("thread_delta") => message["op"]["entry"]["markdown"].as_str().map(str::to_string),
+                    Some("thread_snapshot") => message["entries"]
+                        .as_array()?
+                        .iter()
+                        .rev()
+                        .find_map(|entry| entry["markdown"].as_str().map(str::to_string)),
+                    _ => None,
+                })
+        };
+        // The rest of the reveal raises no event; the phone still gets all of it.
+        for _ in 0..20 {
+            cx.executor().advance_clock(ENTRY_FLUSH_DELAY);
+            cx.run_until_parked();
+        }
+        let received = harness.received();
+        assert_eq!(last_text(&received).as_deref(), Some(full));
+
+        // Text that changes with no event and no reveal running isn't seen by a
+        // flush; a resubscribe (the phone's Refresh) repairs it anyway.
+        thread.update(cx, |thread, cx| {
+            let markdown = thread
+                .entries()
+                .iter()
+                .rev()
+                .find_map(|entry| match entry {
+                    acp_thread::AgentThreadEntry::AssistantMessage(message) => message.chunks.last().and_then(|chunk| match chunk {
+                        acp_thread::AssistantMessageChunk::Message { block, .. } => block.markdowns().last().cloned(),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .expect("an agent message");
+            markdown.update(cx, |markdown, cx| markdown.append(" Done.", cx));
+        });
+        cx.executor().advance_clock(ENTRY_FLUSH_DELAY * 4);
+        cx.run_until_parked();
+        harness.say(json!({ "type": "subscribe", "client_msg_id": "m3", "thread_id": thread_key, "since_seq": 0 }), cx);
+        let received = harness.received();
+        assert_eq!(last_text(&received), Some(format!("{full} Done.")));
+    }
+
     #[gpui::test]
     async fn follows_and_drives_a_thread_from_the_phone(cx: &mut TestAppContext) {
         let (companion, outgoing, identity) = connected_companion(cx);
@@ -1527,6 +1838,7 @@ mod tests {
         let received = harness.received();
         assert_eq!(received[0]["type"], "hello");
         assert_eq!(received[0]["lathe_version"], "1.2.3");
+        assert_eq!(received[0]["features"], json!(["pull_requests", "close_threads", "terminals"]));
         let workspaces = of_type(&received, "workspaces");
         assert_eq!(workspaces[0]["list"][0]["name"], "test");
         let listed = &of_type(&received, "threads")[0]["list"][0];
@@ -1630,6 +1942,34 @@ mod tests {
             of_type(&relay, "push"),
             [&json!({ "type": "push", "kind": "finished", "thread_id": thread_key })]
         );
+
+        // Closing archives the thread, as Lathe's archive does, and it leaves the
+        // phone's list. Closing it again, or one that doesn't exist, is fine.
+        harness.say(
+            json!({ "type": "close_threads", "client_msg_id": "c1", "thread_ids": [thread_key, "missing"] }),
+            cx,
+        );
+        cx.executor().advance_clock(LIST_FLUSH_DELAY * 2);
+        cx.run_until_parked();
+        let received = harness.received();
+        assert_eq!(of_type(&received, "ack")[0], &json!({ "type": "ack", "client_msg_id": "c1", "ok": true }));
+        assert_eq!(of_type(&received, "threads").last().unwrap()["list"], json!([]));
+        cx.update(|cx| {
+            let store = ThreadMetadataStore::global(cx);
+            assert!(store.read(cx).entry(thread_id).unwrap().archived);
+        });
+        harness.say(json!({ "type": "close_threads", "client_msg_id": "c2", "thread_ids": [thread_key] }), cx);
+        harness.say(json!({ "type": "close_threads", "client_msg_id": "c3", "thread_ids": [] }), cx);
+        let codes = harness
+            .received()
+            .iter()
+            .filter(|message| message["type"] == "ack")
+            .map(|ack| (ack["client_msg_id"].clone(), ack["ok"].clone(), ack["error"]["code"].clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            [(json!("c2"), json!(true), Value::Null), (json!("c3"), json!(false), json!("bad_message"))]
+        );
     }
 
     #[gpui::test]
@@ -1650,6 +1990,25 @@ mod tests {
         harness.say(json!({ "type": "new_thread", "client_msg_id": "m2", "workspace_id": "w", "agent_id": "a", "text": "hi" }), cx);
         harness.say(json!({ "type": "new_thread", "client_msg_id": "m4", "workspace_id": "w", "agent_id": "a", "text": "   " }), cx);
         harness.say(json!({ "type": "launch_missiles", "client_msg_id": "m3" }), cx);
+        harness.say(json!({ "type": "list_pull_requests", "client_msg_id": "p1", "workspace_id": "w", "filter": "open", "reviewing": false }), cx);
+        harness.say(json!({ "type": "get_pull_request_diff", "client_msg_id": "p2", "workspace_id": "w", "repo_id": "r", "number": 1 }), cx);
+        harness.say(
+            json!({ "type": "reply_review_comment", "client_msg_id": "p3", "workspace_id": "w", "repo_id": "r", "number": 1, "comment_id": "x", "body": "hi" }),
+            cx,
+        );
+        harness.say(json!({ "type": "submit_review", "client_msg_id": "p4", "workspace_id": "w", "repo_id": "r", "number": 1, "verdict": "merge" }), cx);
+        harness.say(
+            json!({ "type": "create_review_comment", "client_msg_id": "p5", "workspace_id": "w", "repo_id": "r", "number": 1, "path": "src/a.rs", "line": 3, "side": "new", "body": "Why?" }),
+            cx,
+        );
+        harness.say(
+            json!({ "type": "create_review_comment", "client_msg_id": "p6", "workspace_id": "w", "repo_id": "r", "number": 1, "path": "src/a.rs", "line": 3, "side": "new", "body": "  " }),
+            cx,
+        );
+        harness.say(
+            json!({ "type": "create_review_comment", "client_msg_id": "p7", "workspace_id": "w", "repo_id": "r", "number": 1, "path": "src/a.rs", "line": 3, "side": "middle", "body": "Why?" }),
+            cx,
+        );
         let codes = harness
             .received()
             .iter()
@@ -1662,6 +2021,13 @@ mod tests {
                 (json!("m2"), json!("workspace_not_open")),
                 (json!("m4"), json!("bad_message")),
                 (json!("m3"), json!("bad_message")),
+                (json!("p1"), json!("workspace_not_open")),
+                (json!("p2"), json!("workspace_not_open")),
+                (json!("p3"), json!("bad_message")),
+                (json!("p4"), json!("bad_message")),
+                (json!("p5"), json!("workspace_not_open")),
+                (json!("p6"), json!("bad_message")),
+                (json!("p7"), json!("bad_message")),
             ]
         );
     }

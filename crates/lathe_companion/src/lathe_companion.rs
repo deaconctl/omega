@@ -6,6 +6,8 @@ mod companion;
 mod companion_modal;
 mod connection;
 mod entries;
+mod pull_requests;
+mod terminals;
 pub mod crypto;
 pub mod protocol;
 
@@ -22,6 +24,7 @@ pub struct CompanionSettings {
     pub enabled: bool,
     pub relay_url: String,
     pub keep_awake_while_agents_run: bool,
+    pub terminal_input: bool,
 }
 
 impl Settings for CompanionSettings {
@@ -31,6 +34,7 @@ impl Settings for CompanionSettings {
             enabled: companion.enabled.unwrap(),
             relay_url: companion.relay_url.clone().unwrap(),
             keep_awake_while_agents_run: companion.keep_awake_while_agents_run.unwrap(),
+            terminal_input: companion.terminal_input.unwrap(),
         }
     }
 }
@@ -46,6 +50,7 @@ pub fn init(cx: &mut App) {
     })
     .detach();
     init_threads(cx);
+    terminals::init(cx);
     bridge::init(cx);
 }
 

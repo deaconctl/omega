@@ -2,6 +2,105 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.18.0 - 2026-11-05
+
+Everything from the 1.17.0 beta: Lathe Companion can show your terminals.
+
+### Lathe Companion
+
+- **Terminals on your phone.** The companion app can now list the terminals in your open projects, including Claude Code, Codex and other CLI agents running in the agent panel. Open one to see its screen live, with scrollback and colors.
+- **Typing into terminals is off until you turn it on.** It can run any command, so it has its own switch in the companion dialog ("Allow typing into terminals from the phone"), or set `companion.terminal_input`. With it off, the phone can still watch.
+- You get a push when a terminal starts waiting for input, unless you already have it open on the phone.
+
+Needs a companion app update that adds terminals. Until then, nothing changes on the phone.
+
+## v1.17.0-beta - 2026-11-04
+
+### Lathe Companion
+
+- **Terminals on your phone.** The companion app can now list the terminals in your open projects, including Claude Code, Codex and other CLI agents running in the agent panel. Open one to see its screen live, with scrollback and colors.
+- **Typing into terminals is off until you turn it on.** It can run any command, so it has its own switch in the companion dialog ("Allow typing into terminals from the phone"), or set `companion.terminal_input`. With it off, the phone can still watch.
+- You get a push when a terminal starts waiting for input, unless you already have it open on the phone.
+
+Needs a companion app update that adds terminals. Until then, nothing changes on the phone.
+
+## v1.16.0 - 2026-11-02
+
+The first stable release since 1.12.0. Everything from the 1.13.0, 1.14.0, 1.14.1 and 1.15.0 betas is in here, plus AI accounts for any installed agent and a rework of how Gemini signs in.
+
+And the big one: **Lathe Companion**, a phone app for your agents. It's been riding along in the betas switched off. This is the first time it's in the notes, so everything it does is below.
+
+### Before you update
+
+- **Lathe needs macOS 12 (Monterey) or newer now.** Upstream raised the minimum.
+- **The agent's Restore Checkpoint button is gone.** Upstream dropped checkpoints because taking one before every message made the agent slow to respond.
+- **Gemini and "Log in with Google":** Google has turned that off for personal accounts and points you at Antigravity instead. If you use Gemini with a personal account, you need an AI Studio API key from a project with billing (or one that still has free-tier access). Existing API-key accounts keep working as they are.
+
+### Lathe Companion
+
+Keep an eye on your agents from your phone. Approve a tool call from the couch, answer a question from the grocery store, get pinged when a long run finishes.
+
+**Getting set up.** It's off until you turn it on. Run **lathe companion: open companion** from the command palette and choose **Turn on**, then scan the QR code with the app. Lathe asks you to **Allow** the phone before it's paired, so a code someone else scans doesn't get them in. Once it's on, a phone icon in the title bar opens the same dialog.
+
+- Code expired? **New code** makes another, and the old one stops working.
+- **Copy link** gives you a link to open on the phone instead of scanning.
+- The dialog lists your paired phones.
+
+**What the phone can do:**
+
+- See every agent thread in your open projects and follow them live as they stream.
+- Approve or deny tool calls, answer an agent's questions, send messages.
+- Start a new thread with any agent the project has. It opens in the agent panel without pulling the thread you have on screen out from under you.
+- Rename, cancel and close threads. Closing archives a thread the same way Lathe's archive does, so you can bring it back.
+- Change a thread's model and effort. That only affects that one thread, not your default for new ones. Modes stay on the desktop, since some of them skip permission prompts.
+- Push notifications when a thread needs you or finishes.
+- Pull requests: list them per workspace (including the ones waiting on your review), read the diff and comments, reply, leave inline comments, and submit a review. It goes through the git accounts you've already connected in Lathe. No host token ever leaves your computer.
+
+**Privacy.** Everything between Lathe and your phone is end-to-end encrypted. The relay in the middle (`companion.lathe-ide.com`) only sees enough to route messages, not what's in them. Lathe's pairing identity lives in your system keychain.
+
+**Your Mac stays awake** while an agent is running and a phone is paired, so a long run doesn't stall when the lid's open and nobody's touching it. Turn that off with `companion.keep_awake_while_agents_run`.
+
+**Getting the app.** It's on the [App Store](https://apps.apple.com/us/app/lathe-companion/id6825627989) for iPhone. 7-day free trial, then $1.99 a month. Android isn't out yet.
+
+### Added
+
+- **Search Everywhere.** Press `shift shift` for one picker covering files, symbols, types and actions, with tabs to narrow it down. Symbols show up as each language server answers, so files and actions don't wait on them. In the JetBrains keymaps it takes over shift shift from the command palette.
+- **Switch AI accounts without starting a new thread.** Pick another account from the chip in the agent panel and the thread you're in moves over with its history. Works for Claude and Codex. Other agents switch for new threads, and Lathe tells you so.
+- **AI accounts for any installed agent.** Manage AI Accounts lists every agent you've installed, not just Claude, Gemini and Codex. Agents Lathe can't keep separate accounts for are grouped at the bottom with a short explanation. If one of your agents has a profile directory setting, describe it under `ai_account_profiles` in your settings and it gets accounts too. Accounts for an agent you've uninstalled stay listed, so their bindings aren't lost.
+- **Gemini signs in its own way.** New Gemini accounts use the Gemini CLI's own sign-in options instead of a fixed API-key form. The API key field is optional when adding an account, and a lock button on each Gemini account sets or replaces its key later.
+- **The right git account per repo.** With two GitHub (or GitLab, or Bitbucket) accounts connected, the pull request panel checks which one can push to each repo and uses it. `gh` and `glab` in an agent's terminal act as that same account.
+- **Background git fetch.** Off by default. Turn it on with `git.auto_fetch.enabled` and set how often with `git.auto_fetch.interval_secs` (15 seconds minimum). Only runs in trusted repos and never prompts for credentials.
+- **Refs column in the git graph.** Branch and tag badges get their own resizable column, which you can hide from the header's right-click menu.
+- **Foldable Android emulator** in the Mobile panel, next to the phone and tablet ones.
+- Several React Native or Expo projects in one workspace. The Mobile panel finds them all, and the project name becomes a dropdown that picks which one build, run and the scripts target.
+- Debugger hovers show a variable tree you can move through with the keyboard.
+- `"on_new_window": "readme"` opens the project's README when a window has nothing else open.
+- Commit message generation uses your recent commit messages as style examples.
+
+### Fixed
+
+- **Remote development over SSH.** Releases never included the server binary a remote machine needs, so connecting had nothing to download. This release ships it.
+- **Review comments on the right lines.** A comment on a removed line shows under that removed line instead of under whatever new line has the same number. Pull request diffs come from the PR's own changes, so commits that landed on the target branch after you branched don't show up as part of your PR.
+- **GitHub errors you can read.** Creating a pull request with no new commits (and similar) shows GitHub's actual reason instead of a wall of JSON.
+- Gemini accounts no longer share one Google login. The CLI kept every account's login in a single keychain entry, so Lathe now has it store them in each account's own folder.
+- Discarding a file from the unstaged section keeps its staged changes.
+- A repo whose folder moved while it was open gets its git state rebuilt instead of pointing at the old location.
+- Language injections in notebook cells, plus a pile of smaller agent, editor and git fixes from upstream.
+
+### Changed
+
+- Caught up with upstream Zed twice (115 and 186 commits).
+- Releases are built with Xcode 26, which upstream needs now.
+
+### Known issues
+
+- Moving an open conversation to another account only works for Claude and Codex. Gemini and other agents pick up the new account in new threads.
+- Pull requests don't show up in the iPhone app yet. They're coming in the app's next release.
+- Tested by hand on macOS. Windows and Linux builds haven't been tried on real machines for this release.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v1.15.0-beta - 2026-10-29
 
 Caught up with upstream Zed again (186 commits). Two things to know first: Lathe now needs macOS 12 (Monterey) or newer, and the agent's "Restore Checkpoint" button is gone. Upstream dropped checkpoints because taking one before every message made the agent slow to respond.
