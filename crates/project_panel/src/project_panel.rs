@@ -74,8 +74,9 @@ use util::{
     rel_path::{RelPath, RelPathBuf},
 };
 use workspace::{
-    DraggedSelection, OpenInTerminal, OpenMode, OpenOptions, OpenVisible, PreviewTabsSettings,
-    SelectedEntry, SplitDirection, Workspace, WorkspaceSettings, copy_file_permalink,
+    DraggedSelection, FloatingLayout, OpenInTerminal, OpenMode, OpenOptions, OpenVisible,
+    PreviewTabsSettings, SelectedEntry, SplitDirection, Workspace, WorkspaceSettings,
+    copy_file_permalink,
     dock::{DockPosition, Panel, PanelEvent},
     focus_follows_mouse::FocusFollowsMouse as _,
     notifications::{DetachAndPromptErr, NotifyResultExt, NotifyTaskExt},
@@ -6352,6 +6353,7 @@ impl ProjectPanel {
             )
             .cursor_pointer()
             .rounded_none()
+            .when(FloatingLayout::get(cx).is_some(), |this| this.rounded_sm())
             .bg(bg_color)
             .border_1()
             .border_r_2()
