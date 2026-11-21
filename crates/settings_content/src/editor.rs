@@ -1046,6 +1046,13 @@ pub struct JupyterContent {
     /// Default: false
     pub language_server_sidecar: Option<bool>,
 
+    /// Whether to leave cell outputs and execution counts out of saved notebooks,
+    /// so that committed notebooks only change when their code does. Outputs
+    /// stay visible in the editor until it is closed.
+    ///
+    /// Default: false
+    pub clear_outputs_on_save: Option<bool>,
+
     /// Default kernels to select for each language.
     ///
     /// Default: `{}`

@@ -67,16 +67,28 @@ use settings::Settings;
 /// When deciding what to render from a collection of mediatypes, we need to rank them in order of importance
 fn rank_mime_type(mimetype: &MediaType) -> usize {
     match mimetype {
-        MediaType::DataTable(_) => 7,
-        MediaType::Html(_) => 6,
-        MediaType::Json(_) => 5,
-        MediaType::Png(_) => 4,
-        MediaType::Jpeg(_) => 3,
-        MediaType::Markdown(_) => 2,
+        MediaType::DataTable(_) => 11,
+        MediaType::Html(html) if !html_needs_scripts(html) => 10,
+        MediaType::Json(_) => 9,
+        MediaType::Svg(_) => 8,
+        MediaType::Png(_) => 7,
+        MediaType::Gif(_) => 6,
+        MediaType::Jpeg(_) => 5,
+        // HTML built by a script (Plotly, Bokeh, widgets) converts to an empty
+        // markdown block, since the script is dropped. Kernels usually send an
+        // image of the same output alongside it, which is the better choice.
+        MediaType::Html(_) => 4,
+        MediaType::Markdown(_) => 3,
+        // Shown as its source, which beats plain text that is often just a repr.
+        MediaType::Latex(_) => 2,
         MediaType::Plain(_) => 1,
         // All other media types are not supported in Zed at this time
         _ => 0,
     }
+}
+
+fn html_needs_scripts(html: &str) -> bool {
+    html.to_ascii_lowercase().contains("<script")
 }
 
 pub(crate) trait OutputContent {
@@ -373,13 +385,25 @@ impl Output {
                     display_id,
                 }
             }
-            Some(MediaType::Png(data)) | Some(MediaType::Jpeg(data)) => match ImageView::from(data)
-            {
+            Some(MediaType::Png(data))
+            | Some(MediaType::Jpeg(data))
+            | Some(MediaType::Gif(data)) => match ImageView::from(data) {
                 Ok(view) => Output::Image {
                     content: cx.new(|_| view),
                     display_id,
                 },
                 Err(error) => Output::Message(format!("Failed to load image: {}", error)),
+            },
+            Some(MediaType::Svg(source)) => match ImageView::from_svg(source, cx) {
+                Ok(view) => Output::Image {
+                    content: cx.new(|_| view),
+                    display_id,
+                },
+                Err(error) => Output::Message(format!("Failed to load SVG image: {}", error)),
+            },
+            Some(MediaType::Latex(source)) => Output::Plain {
+                content: cx.new(|cx| TerminalOutput::from(source, window, cx)),
+                display_id,
             },
             Some(MediaType::DataTable(data)) => Output::Table {
                 content: cx.new(|cx| TableView::new(data, window, cx)),
@@ -814,37 +838,36 @@ mod tests {
 
     #[test]
     fn test_rank_mime_type_ordering() {
-        let data_table = MediaType::DataTable(Box::default());
-        let html = MediaType::Html(String::new());
-        let json = MediaType::Json(serde_json::json!({}));
-        let png = MediaType::Png(String::new());
-        let jpeg = MediaType::Jpeg(String::new());
-        let markdown = MediaType::Markdown(String::new());
-        let plain = MediaType::Plain(String::new());
-
-        assert_eq!(rank_mime_type(&data_table), 7);
-        assert_eq!(rank_mime_type(&html), 6);
-        assert_eq!(rank_mime_type(&json), 5);
-        assert_eq!(rank_mime_type(&png), 4);
-        assert_eq!(rank_mime_type(&jpeg), 3);
-        assert_eq!(rank_mime_type(&markdown), 2);
-        assert_eq!(rank_mime_type(&plain), 1);
-
-        assert!(rank_mime_type(&data_table) > rank_mime_type(&html));
-        assert!(rank_mime_type(&html) > rank_mime_type(&json));
-        assert!(rank_mime_type(&json) > rank_mime_type(&png));
-        assert!(rank_mime_type(&png) > rank_mime_type(&jpeg));
-        assert!(rank_mime_type(&jpeg) > rank_mime_type(&markdown));
-        assert!(rank_mime_type(&markdown) > rank_mime_type(&plain));
+        let ordered = [
+            MediaType::DataTable(Box::default()),
+            MediaType::Html("<table><tr><td>1</td></tr></table>".to_string()),
+            MediaType::Json(serde_json::json!({})),
+            MediaType::Svg(String::new()),
+            MediaType::Png(String::new()),
+            MediaType::Gif(String::new()),
+            MediaType::Jpeg(String::new()),
+            MediaType::Html("<div></div><script>render()</script>".to_string()),
+            MediaType::Markdown(String::new()),
+            MediaType::Latex(String::new()),
+            MediaType::Plain(String::new()),
+        ];
+        for pair in ordered.windows(2) {
+            assert!(
+                rank_mime_type(&pair[0]) > rank_mime_type(&pair[1]),
+                "{:?} should rank above {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert_eq!(rank_mime_type(&MediaType::Plain(String::new())), 1);
     }
 
     #[test]
-    fn test_rank_mime_type_unsupported_returns_zero() {
-        let svg = MediaType::Svg(String::new());
-        let latex = MediaType::Latex(String::new());
-
-        assert_eq!(rank_mime_type(&svg), 0);
-        assert_eq!(rank_mime_type(&latex), 0);
+    fn test_scripted_html_loses_to_the_image_sent_with_it() {
+        let plotly = MediaType::Html(
+            "<div id=\"chart\"></div><SCRIPT>Plotly.newPlot('chart', data)</SCRIPT>".to_string(),
+        );
+        assert!(rank_mime_type(&MediaType::Png(String::new())) > rank_mime_type(&plotly));
     }
 
     async fn init_test(

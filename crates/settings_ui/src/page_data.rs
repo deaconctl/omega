@@ -3440,7 +3440,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
         ]
     }
 
-    fn jupyter_section() -> [SettingsPageItem; 3] {
+    fn jupyter_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SectionHeader("Jupyter Notebooks"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -3488,6 +3488,31 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                             .jupyter
                             .get_or_insert_default()
                             .language_server_sidecar = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Clear Outputs on Save",
+                description: "Leave cell outputs and execution counts out of saved notebooks, so committed notebooks only change when their code does.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("jupyter.clear_outputs_on_save"),
+                    pick: |settings_content| {
+                        settings_content
+                            .editor
+                            .jupyter
+                            .as_ref()?
+                            .clear_outputs_on_save
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .editor
+                            .jupyter
+                            .get_or_insert_default()
+                            .clear_outputs_on_save = value;
                     },
                 }),
                 metadata: None,

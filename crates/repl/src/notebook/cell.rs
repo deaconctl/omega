@@ -476,7 +476,12 @@ impl MarkdownCell {
                 cx,
             );
 
-            editor.set_show_gutter(false, cx);
+            // The gutter is kept only for git diff markers.
+            editor.set_show_line_numbers(false, cx);
+            editor.set_show_code_actions(false, cx);
+            editor.set_show_runnables(false, cx);
+            editor.set_show_breakpoints(false, cx);
+            editor.set_show_bookmarks(false, cx);
             editor.set_use_modal_editing(true);
             editor.disable_mouse_wheel_zoom();
             editor.disable_scrollbars_and_minimap(window, cx);
@@ -568,6 +573,18 @@ impl MarkdownCell {
         self.editor
             .update(cx, |editor, cx| editor.set_text(text, window, cx));
         self.reparse_markdown(cx);
+    }
+
+    pub fn buffer(&self, cx: &App) -> Option<Entity<Buffer>> {
+        self.editor.read(cx).buffer().read(cx).as_singleton()
+    }
+
+    pub(super) fn set_diff(&mut self, diff: Entity<BufferDiff>, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            editor
+                .buffer()
+                .update(cx, |multi_buffer, cx| multi_buffer.add_diff(diff, cx));
+        });
     }
 
     /// Called when user presses Shift+Enter or Ctrl+Enter while editing.

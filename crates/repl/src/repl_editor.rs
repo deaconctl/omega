@@ -8,6 +8,7 @@ use editor::{Editor, MultiBufferOffset};
 use gpui::{App, Entity, WeakEntity, Window, prelude::*};
 use language::{BufferSnapshot, Language, LanguageName, Point};
 use project::{ProjectItem as _, WorktreeId};
+use util::ResultExt as _;
 use workspace::{Workspace, notifications::NotificationId};
 
 use crate::kernels::PythonEnvKernelSpecification;
@@ -81,8 +82,23 @@ pub fn install_ipykernel_and_assign(
     window: &mut Window,
     cx: &mut App,
 ) -> Result<()> {
+    install_ipykernel(kernel_specification, window, cx, move |spec, window, cx| {
+        assign_kernelspec(spec, weak_editor, window, cx).log_err();
+    })
+}
+
+/// Installs `ipykernel` into a Python environment that lacks it, then calls
+/// `on_ready` with the now-usable kernel. Kernels that need no install are
+/// passed to `on_ready` right away.
+pub fn install_ipykernel(
+    kernel_specification: KernelSpecification,
+    window: &mut Window,
+    cx: &mut App,
+    on_ready: impl FnOnce(KernelSpecification, &mut Window, &mut App) + 'static,
+) -> Result<()> {
     let KernelSpecification::PythonEnv(ref env_spec) = kernel_specification else {
-        return assign_kernelspec(kernel_specification, weak_editor, window, cx);
+        on_ready(kernel_specification, window, cx);
+        return Ok(());
     };
 
     let python_path = env_spec.path.clone();
@@ -171,7 +187,7 @@ pub fn install_ipykernel_and_assign(
                                 has_ipykernel: true,
                                 ..env_spec
                             });
-                        assign_kernelspec(updated_spec, weak_editor, window, cx).ok();
+                        on_ready(updated_spec, window, cx);
                     })
                     .ok();
             }

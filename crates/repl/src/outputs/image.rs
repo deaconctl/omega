@@ -70,6 +70,28 @@ impl ImageView {
         })
     }
 
+    pub fn from_svg(source: &str, cx: &App) -> Result<Self> {
+        let image = cx
+            .svg_renderer()
+            .render_single_frame(source.as_bytes(), 1.0)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        // The renderer rasterizes SVGs at a multiple of the requested scale so they
+        // stay sharp; the image's own size is the rasterized size divided back.
+        let size = image.size(0);
+        let logical = |device_pixels: i32| {
+            (device_pixels as f32 / gpui::SMOOTH_SVG_SCALE_FACTOR).round() as u32
+        };
+        Ok(ImageView {
+            clipboard_image: Arc::new(Image::from_bytes(
+                ImageFormat::Svg,
+                source.as_bytes().to_vec(),
+            )),
+            height: logical(size.height.0),
+            width: logical(size.width.0),
+            image,
+        })
+    }
+
     fn scaled_size(
         &self,
         line_height: Pixels,
@@ -188,5 +210,15 @@ mod tests {
 
         assert_eq!(f32::from(width), 200.0);
         assert_eq!(f32::from(height), 120.0);
+    }
+
+    #[gpui::test]
+    fn test_svg_outputs_render_at_their_own_size(cx: &mut gpui::TestAppContext) {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30"><rect width="40" height="30" fill="red"/></svg>"#;
+        let view = cx
+            .update(|cx| ImageView::from_svg(svg, cx))
+            .expect("a valid SVG should render");
+        assert_eq!((view.width, view.height), (40, 30));
+        assert!(ImageView::from_svg("not an svg", &cx.app.borrow()).is_err());
     }
 }

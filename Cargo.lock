@@ -15210,6 +15210,7 @@ dependencies = [
  "file_icons",
  "fs",
  "futures 0.3.34",
+ "fuzzy",
  "gpui",
  "html_to_markdown",
  "http_client",

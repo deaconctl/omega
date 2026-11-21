@@ -10175,9 +10175,13 @@ impl Element for EditorElement {
                     self.paint_sticky_headers(layout, window, cx);
                     self.paint_minimap(layout, window, cx);
                     self.paint_scrollbars(layout, window, cx);
-                    self.paint_edit_prediction_popover(layout, window, cx);
-                    self.paint_mouse_context_menu(layout, window, cx);
                 });
+
+                // These float above the text and can be taller than the editor, as in
+                // a notebook cell a few lines tall, so the editor's bounds must not clip
+                // them.
+                self.paint_edit_prediction_popover(layout, window, cx);
+                self.paint_mouse_context_menu(layout, window, cx);
             })
         })
     }

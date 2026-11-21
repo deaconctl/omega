@@ -379,9 +379,15 @@ impl ReplStore {
         let found_by_name = self
             .kernel_specifications_for_worktree(worktree_id)
             .find(|runtime_specification| {
-                if let (Some(selected), KernelSpecification::Jupyter(runtime_specification)) =
-                    (selected_kernel, runtime_specification)
-                {
+                let Some(selected) = selected_kernel else {
+                    return false;
+                };
+                // Notebooks record their choice by interpreter path, since several
+                // environments can share a name.
+                if runtime_specification.path().as_ref() == selected.as_str() {
+                    return true;
+                }
+                if let KernelSpecification::Jupyter(runtime_specification) = runtime_specification {
                     return runtime_specification.name.to_lowercase() == selected.to_lowercase();
                 }
                 false

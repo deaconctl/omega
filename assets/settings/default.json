@@ -2884,6 +2884,9 @@
     // cells get completions and diagnostics. The file is deleted when the notebook
     // closes. Add `.*.ipynb.*` to your .gitignore if you turn this on.
     "language_server_sidecar": false,
+    // Whether to leave cell outputs and execution counts out of saved notebooks, so
+    // committed notebooks only change when their code does.
+    "clear_outputs_on_save": false,
     "kernel_selections": {},
     // Specify the language name as the key and the kernel name as the value.
     // "kernel_selections": {
