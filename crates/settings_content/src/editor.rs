@@ -1031,6 +1031,21 @@ pub struct JupyterContent {
     /// Default: true
     pub enabled: Option<bool>,
 
+    /// Whether to open `.ipynb` files in the notebook editor instead of as JSON.
+    /// Turning it off again takes effect after a restart.
+    ///
+    /// Default: false
+    pub notebook_enabled: Option<bool>,
+
+    /// Whether to back a notebook's code cells with a hidden file next to it, so
+    /// that language servers attach and cells get completions and diagnostics.
+    /// Opening `analysis.ipynb` writes `.analysis.ipynb.py`, which is deleted when
+    /// the notebook is closed. Add `.*.ipynb.*` to your `.gitignore` if you turn
+    /// this on.
+    ///
+    /// Default: false
+    pub language_server_sidecar: Option<bool>,
+
     /// Default kernels to select for each language.
     ///
     /// Default: `{}`

@@ -1,21 +1,25 @@
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use editor::{Editor, EditorMode, MultiBuffer, SizingBehavior};
-use futures::{StreamExt as _, future::Shared};
+use buffer_diff::BufferDiff;
+use editor::{Editor, EditorMode, MultiBuffer, MultiBufferOffset, PathKey, SizingBehavior};
+use futures::StreamExt as _;
 use gpui::{
     App, Entity, EventEmitter, Focusable, Hsla, InteractiveElement, RetainAllImageCache,
     StatefulInteractiveElement, Task, prelude::*,
 };
 use jupyter_protocol::{JupyterMessage, JupyterMessageContent};
-use language::{Buffer, Language, LanguageRegistry};
+use language::{Buffer, Capability, LanguageRegistry, Point};
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use nbformat::v4::{CellId, CellMetadata, CellType};
+use project::Project;
 use settings::Settings as _;
 use ui::{CommonAnimationExt, IconButtonShape, prelude::*};
 use util::ResultExt;
 use zed_actions::notebook::InterruptKernel;
 
+use super::file_format::source_lines;
 use crate::{
     notebook::{CODE_BLOCK_INSET, GUTTER_WIDTH},
     outputs::{Output, plain, plain::TerminalOutput, user_error::ErrorView},
@@ -172,14 +176,16 @@ impl Cell {
         match self {
             Cell::Code(code_cell) => code_cell.read(cx).is_dirty(cx),
             Cell::Markdown(markdown_cell) => markdown_cell.read(cx).is_dirty(cx),
-            Cell::Raw(_) => false,
+            Cell::Raw(raw_cell) => raw_cell.read(cx).dirty,
         }
     }
 
     pub fn load(
         cell: &nbformat::v4::Cell,
         languages: &Arc<LanguageRegistry>,
-        notebook_language: Shared<Task<Option<Arc<Language>>>>,
+        code_document: &Entity<Buffer>,
+        code_range: Option<Range<Point>>,
+        project: &Entity<Project>,
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
@@ -209,10 +215,10 @@ impl Cell {
                 id,
                 metadata,
                 execution_count,
-                source,
                 outputs,
+                ..
             } => {
-                let text = source.concat();
+                let saved_outputs = outputs.clone();
                 let outputs = convert_outputs(outputs, window, cx);
 
                 Cell::Code(cx.new(|cx| {
@@ -220,12 +226,13 @@ impl Cell {
                         CellSource::Existing {
                             execution_count: *execution_count,
                             outputs,
+                            saved_outputs,
                         },
                         id.clone(),
                         metadata.clone(),
-                        text,
-                        languages.clone(),
-                        notebook_language,
+                        code_document.clone(),
+                        code_range,
+                        Some(project.clone()),
                         window,
                         cx,
                     )
@@ -239,6 +246,7 @@ impl Cell {
                 id: id.clone(),
                 metadata: metadata.clone(),
                 source: source.concat(),
+                dirty: false,
                 selected: false,
                 cell_position: None,
             })),
@@ -388,7 +396,7 @@ pub trait RunnableCell: RenderableCell {
 /// whenever loaded languages change. This is a simpler version of what
 /// `LspStore::maintain_buffer_languages` does for other project buffers, but this way does not
 /// require registering each cell as a project buffer.
-fn new_cell_buffer(
+pub(super) fn new_cell_buffer(
     source: &str,
     languages: Arc<LanguageRegistry>,
     cx: &mut App,
@@ -524,7 +532,7 @@ impl MarkdownCell {
 
     pub fn to_nbformat_cell(&self, cx: &App) -> nbformat::v4::Cell {
         let source = self.current_source(cx);
-        let source_lines: Vec<String> = source.lines().map(|l| format!("{}\n", l)).collect();
+        let source_lines = source_lines(&source);
 
         nbformat::v4::Cell::Markdown {
             id: self.id.clone(),
@@ -554,6 +562,12 @@ impl MarkdownCell {
         self.markdown.update(cx, |markdown, cx| {
             markdown.reset(source.into(), cx);
         });
+    }
+
+    pub fn set_source(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.set_text(text, window, cx));
+        self.reparse_markdown(cx);
     }
 
     /// Called when user presses Shift+Enter or Ctrl+Enter while editing.
@@ -686,13 +700,20 @@ pub struct CodeCell {
     id: CellId,
     metadata: CellMetadata,
     execution_count: Option<i32>,
+    /// The source as of the last load or save, to tell whether the cell is dirty.
     source: String,
+    /// The notebook's shared code buffer, of which this cell's editor shows one
+    /// excerpt.
+    document: Entity<Buffer>,
     editor: Entity<editor::Editor>,
     outputs: Vec<Output>,
+    /// The outputs in the form they are saved in. Rendering an output loses
+    /// information (widget state, metadata, media types that aren't displayed),
+    /// so these are kept alongside the rendered `outputs` rather than rebuilt
+    /// from them.
+    saved_outputs: Vec<nbformat::v4::Output>,
     selected: bool,
     cell_position: Option<CellPosition>,
-    _language_task: Task<()>,
-    _reparse_task: Task<()>,
     execution_start_time: Option<Instant>,
     execution_duration: Option<Duration>,
     is_executing: bool,
@@ -707,16 +728,18 @@ pub(super) enum CellSource {
     Existing {
         execution_count: Option<i32>,
         outputs: Vec<Output>,
+        saved_outputs: Vec<nbformat::v4::Output>,
     },
 }
 
 impl CellSource {
-    fn into_outputs(self) -> (Option<i32>, Vec<Output>) {
+    fn into_outputs(self) -> (Option<i32>, Vec<Output>, Vec<nbformat::v4::Output>) {
         match self {
             CellSource::Existing {
                 execution_count,
                 outputs,
-            } => (execution_count, outputs),
+                saved_outputs,
+            } => (execution_count, outputs, saved_outputs),
             CellSource::None => Default::default(),
         }
     }
@@ -727,14 +750,28 @@ impl CodeCell {
         cell_source: CellSource,
         id: CellId,
         metadata: CellMetadata,
-        source: String,
-        languages: Arc<LanguageRegistry>,
-        notebook_language: Shared<Task<Option<Arc<Language>>>>,
+        document: Entity<Buffer>,
+        range: Option<Range<Point>>,
+        project: Option<Entity<Project>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (buffer, reparse_task) = new_cell_buffer(&source, languages, cx);
-        let multi_buffer = cx.new(|cx| MultiBuffer::singleton(buffer.clone(), cx));
+        let multi_buffer = cx.new(|cx| {
+            let mut multi_buffer = MultiBuffer::without_headers(Capability::ReadWrite);
+            // A cell without a range yet is empty until the shared code buffer
+            // is rebuilt with it.
+            if let Some(range) = range {
+                multi_buffer.set_excerpts_for_path(
+                    PathKey::sorted(0),
+                    document.clone(),
+                    [range],
+                    0,
+                    cx,
+                );
+            }
+            multi_buffer
+        });
+        let source = multi_buffer.read(cx).snapshot(cx).text();
 
         let editor = cx.new(|cx| {
             let mut editor = Editor::new(
@@ -744,55 +781,86 @@ impl CodeCell {
                     sizing_behavior: SizingBehavior::SizeByContent,
                 },
                 multi_buffer,
-                None,
+                project,
                 window,
                 cx,
             );
 
             editor.disable_mouse_wheel_zoom();
             editor.disable_scrollbars_and_minimap(window, cx);
-            editor.set_text(source.clone(), window, cx);
-            editor.set_show_gutter(false, cx);
+            // The gutter is kept only for git diff markers.
+            editor.set_show_line_numbers(false, cx);
+            editor.set_show_code_actions(false, cx);
+            editor.set_show_runnables(false, cx);
+            editor.set_show_breakpoints(false, cx);
+            editor.set_show_bookmarks(false, cx);
             editor.set_use_modal_editing(true);
             editor
         });
 
-        let language_task = cx.spawn_in(window, async move |_this, cx| {
-            let language = notebook_language.await;
-            buffer.update(cx, |buffer, cx| {
-                buffer.set_language(language.clone(), cx);
-            });
-        });
-
-        let (execution_count, outputs) = cell_source.into_outputs();
+        let (execution_count, outputs, saved_outputs) = cell_source.into_outputs();
 
         Self {
             id,
             metadata,
             execution_count,
             source,
+            document,
             editor,
             outputs,
+            saved_outputs,
             selected: false,
             cell_position: None,
             execution_start_time: None,
             execution_duration: None,
             is_executing: false,
-            _language_task: language_task,
-            _reparse_task: reparse_task,
         }
     }
 
-    pub fn set_language(&mut self, language: Option<Arc<Language>>, cx: &mut Context<Self>) {
+    /// Points this cell's editor at `range` of the shared code buffer, after the
+    /// buffer has been rewritten.
+    pub(super) fn set_document_range(
+        &mut self,
+        document: Entity<Buffer>,
+        range: Range<Point>,
+        cx: &mut Context<Self>,
+    ) {
+        self.document = document.clone();
         self.editor.update(cx, |editor, cx| {
-            editor.buffer().update(cx, |buffer, cx| {
-                if let Some(buffer) = buffer.as_singleton() {
-                    buffer.update(cx, |buffer, cx| {
-                        buffer.set_language(language, cx);
-                    });
-                }
+            editor.buffer().update(cx, |multi_buffer, cx| {
+                multi_buffer.set_excerpts_for_path(PathKey::sorted(0), document, [range], 0, cx);
             });
         });
+        cx.notify();
+    }
+
+    /// Shows `diff`'s hunks in this cell's gutter. The diff covers the whole
+    /// shared code buffer; the editor only draws the part in its excerpt.
+    pub(super) fn set_diff(&mut self, diff: Entity<BufferDiff>, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            editor
+                .buffer()
+                .update(cx, |multi_buffer, cx| multi_buffer.add_diff(diff, cx));
+        });
+    }
+
+    pub fn document(&self) -> &Entity<Buffer> {
+        &self.document
+    }
+
+    /// Replaces the cell's text, keeping it within its excerpt of the shared
+    /// code buffer.
+    pub fn set_source(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            editor.buffer().update(cx, |multi_buffer, cx| {
+                let len = multi_buffer.len(cx);
+                multi_buffer.edit([(MultiBufferOffset(0)..len, text)], None, cx);
+            });
+        });
+    }
+
+    pub fn mark_as_saved(&mut self, cx: &App) {
+        self.source = self.current_source(cx);
     }
 
     pub fn editor(&self) -> &Entity<editor::Editor> {
@@ -800,38 +868,24 @@ impl CodeCell {
     }
 
     pub fn current_source(&self, cx: &App) -> String {
-        let editor = self.editor.read(cx);
-        let buffer = editor.buffer().read(cx);
-        buffer
-            .as_singleton()
-            .map(|b| b.read(cx).text())
-            .unwrap_or_default()
+        self.editor.read(cx).buffer().read(cx).snapshot(cx).text()
     }
 
     pub fn is_dirty(&self, cx: &App) -> bool {
-        self.editor.read(cx).buffer().read(cx).is_dirty(cx)
+        self.current_source(cx) != self.source
     }
 
     pub fn to_nbformat_cell(&self, cx: &App) -> nbformat::v4::Cell {
         let source = self.current_source(cx);
-        let source_lines: Vec<String> = source.lines().map(|l| format!("{}\n", l)).collect();
-
-        let outputs = self.outputs_to_nbformat(cx);
+        let source_lines = source_lines(&source);
 
         nbformat::v4::Cell::Code {
             id: self.id.clone(),
             metadata: self.metadata.clone(),
             execution_count: self.execution_count,
             source: source_lines,
-            outputs,
+            outputs: self.saved_outputs.clone(),
         }
-    }
-
-    fn outputs_to_nbformat(&self, cx: &App) -> Vec<nbformat::v4::Output> {
-        self.outputs
-            .iter()
-            .filter_map(|output| output.to_nbformat(cx))
-            .collect()
     }
 
     pub fn has_outputs(&self) -> bool {
@@ -840,6 +894,7 @@ impl CodeCell {
 
     pub fn clear_outputs(&mut self) {
         self.outputs.clear();
+        self.saved_outputs.clear();
         self.execution_duration = None;
     }
 
@@ -869,6 +924,12 @@ impl CodeCell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.saved_outputs
+            .push(nbformat::v4::Output::Error(nbformat::v4::ErrorOutput {
+                ename: "Kernel Error".to_string(),
+                evalue: "cell could not be executed".to_string(),
+                traceback: error_message.lines().map(str::to_string).collect(),
+            }));
         self.outputs.push(Output::ErrorOutput(ErrorView {
             ename: "Kernel Error".to_string(),
             evalue: "cell could not be executed".to_string(),
@@ -896,6 +957,28 @@ impl CodeCell {
         }
     }
 
+    /// Jupyter merges consecutive writes to the same stream into one output when
+    /// saving, so a loop that prints a hundred lines saves as one output.
+    fn save_stream_output(&mut self, stream: &jupyter_protocol::StreamContent) {
+        let name = match stream.name {
+            jupyter_protocol::Stdio::Stdout => "stdout",
+            jupyter_protocol::Stdio::Stderr => "stderr",
+        };
+        if let Some(nbformat::v4::Output::Stream {
+            name: last_name,
+            text,
+        }) = self.saved_outputs.last_mut()
+            && last_name == name
+        {
+            text.0.push_str(&stream.text);
+            return;
+        }
+        self.saved_outputs.push(nbformat::v4::Output::Stream {
+            name: name.to_string(),
+            text: nbformat::v4::MultilineString(stream.text.clone()),
+        });
+    }
+
     pub fn handle_message(
         &mut self,
         message: &JupyterMessage,
@@ -907,14 +990,28 @@ impl CodeCell {
                 self.outputs.push(Output::Stream {
                     content: cx.new(|cx| TerminalOutput::from(&stream.text, window, cx)),
                 });
+                self.save_stream_output(stream);
             }
             JupyterMessageContent::DisplayData(display_data) => {
                 self.outputs
                     .push(Output::new(&display_data.data, None, window, cx));
+                self.saved_outputs.push(nbformat::v4::Output::DisplayData(
+                    nbformat::v4::DisplayData {
+                        data: display_data.data.clone(),
+                        metadata: display_data.metadata.clone(),
+                    },
+                ));
             }
             JupyterMessageContent::ExecuteResult(execute_result) => {
                 self.outputs
                     .push(Output::new(&execute_result.data, None, window, cx));
+                self.saved_outputs.push(nbformat::v4::Output::ExecuteResult(
+                    nbformat::v4::ExecuteResult {
+                        execution_count: execute_result.execution_count,
+                        data: execute_result.data.clone(),
+                        metadata: execute_result.metadata.clone(),
+                    },
+                ));
             }
             JupyterMessageContent::ExecuteInput(input) => {
                 self.execution_count = serde_json::to_value(&input.execution_count)
@@ -926,6 +1023,12 @@ impl CodeCell {
                 self.finish_execution();
             }
             JupyterMessageContent::ErrorOutput(error) => {
+                self.saved_outputs
+                    .push(nbformat::v4::Output::Error(nbformat::v4::ErrorOutput {
+                        ename: error.ename.clone(),
+                        evalue: error.evalue.clone(),
+                        traceback: error.traceback.clone(),
+                    }));
                 self.outputs.push(Output::ErrorOutput(ErrorView {
                     ename: error.ename.clone(),
                     evalue: error.evalue.clone(),
@@ -1277,13 +1380,26 @@ pub struct RawCell {
     id: CellId,
     metadata: CellMetadata,
     source: String,
+    /// Raw cells are only edited through the source view, which marks them dirty.
+    dirty: bool,
     selected: bool,
     cell_position: Option<CellPosition>,
 }
 
 impl RawCell {
+    pub fn set_source(&mut self, text: &str) {
+        if self.source != text {
+            self.source = text.to_string();
+            self.dirty = true;
+        }
+    }
+
+    pub fn mark_as_saved(&mut self) {
+        self.dirty = false;
+    }
+
     pub fn to_nbformat_cell(&self) -> nbformat::v4::Cell {
-        let source_lines: Vec<String> = self.source.lines().map(|l| format!("{}\n", l)).collect();
+        let source_lines = source_lines(&self.source);
 
         nbformat::v4::Cell::Raw {
             id: self.id.clone(),
@@ -1367,10 +1483,9 @@ mod tests {
     use super::*;
 
     use collections::HashSet;
-    use futures::FutureExt as _;
     use gpui::TestAppContext;
     use indoc::indoc;
-    use language::LanguageConfig;
+    use language::{Language, LanguageConfig};
     use settings::SettingsStore;
 
     fn init_test(cx: &mut TestAppContext) {
@@ -1408,8 +1523,16 @@ mod tests {
         });
     }
 
-    fn assert_layer_languages(editor: &Entity<Editor>, expected_langs: &[&str], cx: &App) {
-        let buffer = editor.read(cx).buffer().read(cx).as_singleton().unwrap();
+    fn markdown_cell_buffer(editor: &Entity<Editor>, cx: &App) -> Entity<Buffer> {
+        editor
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .as_singleton()
+            .expect("markdown cells edit a buffer of their own")
+    }
+
+    fn assert_layer_languages(buffer: &Entity<Buffer>, expected_langs: &[&str], cx: &App) {
         let snapshot = buffer.read(cx).snapshot();
         let actual = snapshot
             .syntax_layers_languages()
@@ -1454,7 +1577,7 @@ mod tests {
         cx.run_until_parked();
 
         cell.read_with(cx, |cell, cx| {
-            assert_layer_languages(&cell.editor, expected_langs, cx)
+            assert_layer_languages(&markdown_cell_buffer(&cell.editor, cx), expected_langs, cx)
         });
     }
 
@@ -1513,7 +1636,11 @@ mod tests {
         cx.run_until_parked();
 
         cell.read_with(cx, |cell, cx| {
-            assert_layer_languages(&cell.editor, &["Markdown", "Markdown-Inline"], cx)
+            assert_layer_languages(
+                &markdown_cell_buffer(&cell.editor, cx),
+                &["Markdown", "Markdown-Inline"],
+                cx,
+            )
         });
     }
 
@@ -1525,21 +1652,29 @@ mod tests {
         languages.add(languages::markdown_lang());
         register_markdown_inline_lazily(&languages);
 
-        // Any kernel language can inject others; Markdown is the injecting
-        // language available to these tests.
-        let notebook_language = Task::ready(Some(languages::markdown_lang())).shared();
         let metadata: CellMetadata = serde_json::from_str("{}").unwrap();
 
         let cx = cx.add_empty_window();
+        let (document, _reparse_task) = cx.update(|_, cx| {
+            let (document, reparse_task) =
+                new_cell_buffer("Some *emphasized* text", languages.clone(), cx);
+            // Any kernel language can inject others; Markdown is the injecting
+            // language available to these tests.
+            document.update(cx, |document, cx| {
+                document.set_language(Some(languages::markdown_lang()), cx)
+            });
+            (document, reparse_task)
+        });
         let cell = cx.update(|window, cx| {
+            let range = Point::zero()..document.read(cx).max_point();
             cx.new(|cx| {
                 CodeCell::new(
                     CellSource::None,
                     uuid::Uuid::new_v4().into(),
                     metadata,
-                    "Some *emphasized* text".to_string(),
-                    languages,
-                    notebook_language,
+                    document.clone(),
+                    Some(range),
+                    None,
                     window,
                     cx,
                 )
@@ -1548,7 +1683,7 @@ mod tests {
         cx.run_until_parked();
 
         cell.read_with(cx, |cell, cx| {
-            assert_layer_languages(&cell.editor, &["Markdown", "Markdown-Inline"], cx)
+            assert_layer_languages(cell.document(), &["Markdown", "Markdown-Inline"], cx)
         });
     }
 }

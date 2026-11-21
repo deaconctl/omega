@@ -10,6 +10,13 @@ use crate::{
     SystemColors,
 };
 
+/// Opacity applied to a theme's `version_control.*` colors to derive the git status
+/// background of editor tabs, when the theme doesn't set one explicitly.
+pub const GIT_TAB_BACKGROUND_OPACITY: f32 = 0.12;
+/// Opacity applied to a theme's `version_control.*` colors to derive the git status
+/// background of project panel entries, when the theme doesn't set one explicitly.
+pub const GIT_PANEL_BACKGROUND_OPACITY: f32 = 0.08;
+
 #[derive(Refineable, Clone, Debug, PartialEq)]
 #[refineable(Debug, serde::Deserialize)]
 pub struct ThemeColors {
@@ -127,6 +134,26 @@ pub struct ThemeColors {
     pub tab_bar_background: Hsla,
     pub tab_inactive_background: Hsla,
     pub tab_active_background: Hsla,
+    /// Background of an editor tab whose file is added or untracked in git.
+    /// Only painted when `tabs.git_status` is enabled.
+    pub tab_git_added_background: Hsla,
+    /// Background of an editor tab whose file is modified in git.
+    /// Only painted when `tabs.git_status` is enabled.
+    pub tab_git_modified_background: Hsla,
+    /// Background of an editor tab whose file is deleted in git.
+    /// Only painted when `tabs.git_status` is enabled.
+    pub tab_git_deleted_background: Hsla,
+    /// Background of an editor tab whose file is in conflict in git.
+    /// Only painted when `tabs.git_status` is enabled.
+    pub tab_git_conflict_background: Hsla,
+    /// Background of a project panel entry whose file is added or untracked in git.
+    pub panel_git_added_background: Hsla,
+    /// Background of a project panel entry whose file is modified in git.
+    pub panel_git_modified_background: Hsla,
+    /// Background of a project panel entry whose file is deleted in git.
+    pub panel_git_deleted_background: Hsla,
+    /// Background of a project panel entry whose file is in conflict in git.
+    pub panel_git_conflict_background: Hsla,
     pub search_match_background: Hsla,
     pub search_active_match_background: Hsla,
     pub panel_background: Hsla,
@@ -386,6 +413,14 @@ pub enum ThemeColorField {
     TabBarBackground,
     TabInactiveBackground,
     TabActiveBackground,
+    TabGitAddedBackground,
+    TabGitModifiedBackground,
+    TabGitDeletedBackground,
+    TabGitConflictBackground,
+    PanelGitAddedBackground,
+    PanelGitModifiedBackground,
+    PanelGitDeletedBackground,
+    PanelGitConflictBackground,
     SearchMatchBackground,
     SearchActiveMatchBackground,
     PanelBackground,
@@ -511,6 +546,14 @@ impl ThemeColors {
             ThemeColorField::TabBarBackground => self.tab_bar_background,
             ThemeColorField::TabInactiveBackground => self.tab_inactive_background,
             ThemeColorField::TabActiveBackground => self.tab_active_background,
+            ThemeColorField::TabGitAddedBackground => self.tab_git_added_background,
+            ThemeColorField::TabGitModifiedBackground => self.tab_git_modified_background,
+            ThemeColorField::TabGitDeletedBackground => self.tab_git_deleted_background,
+            ThemeColorField::TabGitConflictBackground => self.tab_git_conflict_background,
+            ThemeColorField::PanelGitAddedBackground => self.panel_git_added_background,
+            ThemeColorField::PanelGitModifiedBackground => self.panel_git_modified_background,
+            ThemeColorField::PanelGitDeletedBackground => self.panel_git_deleted_background,
+            ThemeColorField::PanelGitConflictBackground => self.panel_git_conflict_background,
             ThemeColorField::SearchMatchBackground => self.search_match_background,
             ThemeColorField::SearchActiveMatchBackground => self.search_active_match_background,
             ThemeColorField::PanelBackground => self.panel_background,

@@ -985,6 +985,8 @@ pub mod notebook {
             EnterEditMode,
             /// Exits the cell editor and returns to cell command mode.
             EnterCommandMode,
+            /// Switches between the cells and the whole notebook as one `# %%` script.
+            ToggleSourceView,
         ]
     );
 }

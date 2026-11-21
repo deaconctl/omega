@@ -3440,6 +3440,62 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
         ]
     }
 
+    fn jupyter_section() -> [SettingsPageItem; 3] {
+        [
+            SettingsPageItem::SectionHeader("Jupyter Notebooks"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Notebook Editor",
+                description: "Open .ipynb files in the notebook editor instead of as JSON. Turning it off again takes effect after a restart.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("jupyter.notebook_enabled"),
+                    pick: |settings_content| {
+                        settings_content
+                            .editor
+                            .jupyter
+                            .as_ref()?
+                            .notebook_enabled
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .editor
+                            .jupyter
+                            .get_or_insert_default()
+                            .notebook_enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Language Server Support in Cells",
+                description: "Back a notebook's code cells with a hidden file next to it, so language servers give cells completions and diagnostics. The file is deleted when the notebook closes; add `.*.ipynb.*` to your .gitignore if you turn this on.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("jupyter.language_server_sidecar"),
+                    pick: |settings_content| {
+                        settings_content
+                            .editor
+                            .jupyter
+                            .as_ref()?
+                            .language_server_sidecar
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .editor
+                            .jupyter
+                            .get_or_insert_default()
+                            .language_server_sidecar = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     fn diagnostics_section() -> [SettingsPageItem; 3] {
         [
             SettingsPageItem::SectionHeader("Diagnostics"),
@@ -3721,6 +3777,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
             concat_sections!(
                 non_editor_language_settings_data(),
                 file_types_section(),
+                jupyter_section(),
                 diagnostics_section(),
                 inline_diagnostics_section(),
                 lsp_pull_diagnostics_section(),

@@ -7,6 +7,8 @@ use settings::{RegisterSetting, Settings};
 #[derive(Debug, Default, RegisterSetting)]
 pub struct JupyterSettings {
     pub kernel_selections: HashMap<String, String>,
+    pub notebook_enabled: bool,
+    pub language_server_sidecar: bool,
 }
 
 impl JupyterSettings {
@@ -23,6 +25,8 @@ impl Settings for JupyterSettings {
         let jupyter = content.editor.jupyter.clone().unwrap();
         Self {
             kernel_selections: jupyter.kernel_selections.unwrap_or_default(),
+            notebook_enabled: jupyter.notebook_enabled.unwrap_or_default(),
+            language_server_sidecar: jupyter.language_server_sidecar.unwrap_or_default(),
         }
     }
 }

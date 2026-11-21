@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use gpui::{AnyElement, IntoElement, Stateful};
+use gpui::{AnyElement, Hsla, IntoElement, Stateful};
 use smallvec::SmallVec;
 
 use crate::prelude::*;
@@ -35,6 +35,7 @@ pub struct Tab {
     selected: bool,
     position: TabPosition,
     close_side: TabCloseSide,
+    tint: Option<Hsla>,
     start_slot: Option<AnyElement>,
     end_slot: Option<AnyElement>,
     children: SmallVec<[AnyElement; 2]>,
@@ -50,6 +51,7 @@ impl Tab {
             selected: false,
             position: TabPosition::First,
             close_side: TabCloseSide::End,
+            tint: None,
             start_slot: None,
             end_slot: None,
             children: SmallVec::new(),
@@ -63,6 +65,13 @@ impl Tab {
 
     pub fn close_side(mut self, close_side: TabCloseSide) -> Self {
         self.close_side = close_side;
+        self
+    }
+
+    /// Blends a translucent color over the tab's background, for example to
+    /// show the git status of the tab's file.
+    pub fn tint(mut self, tint: impl Into<Option<Hsla>>) -> Self {
+        self.tint = tint.into();
         self
     }
 
@@ -123,6 +132,8 @@ impl RenderOnce for Tab {
                 cx.theme().colors().element_active,
             ),
         };
+
+        let tab_bg = self.tint.map_or(tab_bg, |tint| tab_bg.blend(tint));
 
         let (start_slot, end_slot) = {
             let start_slot = h_flex()

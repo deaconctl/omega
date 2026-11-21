@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 
 use crate::ColorScale;
 use crate::scale::{ColorScaleSet, ColorScales};
-use crate::{SystemColors, ThemeColors};
+use crate::{GIT_PANEL_BACKGROUND_OPACITY, GIT_TAB_BACKGROUND_OPACITY, SystemColors, ThemeColors};
 
 pub(crate) fn neutral() -> &'static ColorScaleSet {
     static NEUTRAL: LazyLock<ColorScaleSet> = LazyLock::new(sand);
@@ -92,6 +92,20 @@ impl ThemeColors {
             tab_bar_background: neutral().light().step_2(),
             tab_inactive_background: neutral().light().step_2(),
             tab_active_background: neutral().light().step_1(),
+            tab_git_added_background: ADDED_COLOR.opacity(GIT_TAB_BACKGROUND_OPACITY),
+            tab_git_modified_background: MODIFIED_COLOR.opacity(GIT_TAB_BACKGROUND_OPACITY),
+            tab_git_deleted_background: REMOVED_COLOR.opacity(GIT_TAB_BACKGROUND_OPACITY),
+            tab_git_conflict_background: orange()
+                .light()
+                .step_12()
+                .opacity(GIT_TAB_BACKGROUND_OPACITY),
+            panel_git_added_background: ADDED_COLOR.opacity(GIT_PANEL_BACKGROUND_OPACITY),
+            panel_git_modified_background: MODIFIED_COLOR.opacity(GIT_PANEL_BACKGROUND_OPACITY),
+            panel_git_deleted_background: REMOVED_COLOR.opacity(GIT_PANEL_BACKGROUND_OPACITY),
+            panel_git_conflict_background: orange()
+                .light()
+                .step_12()
+                .opacity(GIT_PANEL_BACKGROUND_OPACITY),
             search_match_background: neutral().light().step_5(),
             search_active_match_background: neutral().light().step_7(),
             panel_background: neutral().light().step_2(),
@@ -246,6 +260,20 @@ impl ThemeColors {
             tab_bar_background: neutral().dark().step_2(),
             tab_inactive_background: neutral().dark().step_2(),
             tab_active_background: neutral().dark().step_1(),
+            tab_git_added_background: ADDED_COLOR.opacity(GIT_TAB_BACKGROUND_OPACITY),
+            tab_git_modified_background: MODIFIED_COLOR.opacity(GIT_TAB_BACKGROUND_OPACITY),
+            tab_git_deleted_background: REMOVED_COLOR.opacity(GIT_TAB_BACKGROUND_OPACITY),
+            tab_git_conflict_background: orange()
+                .dark()
+                .step_12()
+                .opacity(GIT_TAB_BACKGROUND_OPACITY),
+            panel_git_added_background: ADDED_COLOR.opacity(GIT_PANEL_BACKGROUND_OPACITY),
+            panel_git_modified_background: MODIFIED_COLOR.opacity(GIT_PANEL_BACKGROUND_OPACITY),
+            panel_git_deleted_background: REMOVED_COLOR.opacity(GIT_PANEL_BACKGROUND_OPACITY),
+            panel_git_conflict_background: orange()
+                .dark()
+                .step_12()
+                .opacity(GIT_PANEL_BACKGROUND_OPACITY),
             search_match_background: neutral().dark().step_5(),
             search_active_match_background: neutral().dark().step_3(),
             panel_background: neutral().dark().step_2(),

@@ -11,7 +11,10 @@ pub use settings::{
 };
 pub use settings::{FontWeightContent, WindowBackgroundContent};
 
-use theme::{StatusColorsRefinement, ThemeColorsRefinement};
+use theme::{
+    GIT_PANEL_BACKGROUND_OPACITY, GIT_TAB_BACKGROUND_OPACITY, StatusColorsRefinement,
+    ThemeColorsRefinement,
+};
 
 const LIGHT_DIFF_HUNK_FILLED_OPACITY: f32 = 0.16;
 const LIGHT_DIFF_HUNK_HOLLOW_BACKGROUND_OPACITY: f32 = 0.08;
@@ -296,6 +299,16 @@ pub fn theme_colors_refinement(
         .as_ref()
         .and_then(|color| try_parse_color(color).ok())
         .or(status_colors.deleted);
+    let version_control_modified = this
+        .version_control_modified
+        .as_ref()
+        .and_then(|color| try_parse_color(color).ok())
+        .or(status_colors.modified);
+    let version_control_conflict = this
+        .version_control_conflict
+        .as_ref()
+        .and_then(|color| try_parse_color(color).ok())
+        .or(status_colors.ignored);
     let (hunk_fill, hunk_hollow_bg, hunk_hollow_border) = if is_light {
         (
             LIGHT_DIFF_HUNK_FILLED_OPACITY,
@@ -464,6 +477,62 @@ pub fn theme_colors_refinement(
             .tab_active_background
             .as_ref()
             .and_then(|color| try_parse_color(color).ok()),
+        tab_git_added_background: this
+            .tab_git_added_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok())
+            .or_else(|| {
+                version_control_added.map(|color| color.opacity(GIT_TAB_BACKGROUND_OPACITY))
+            }),
+        tab_git_modified_background: this
+            .tab_git_modified_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok())
+            .or_else(|| {
+                version_control_modified.map(|color| color.opacity(GIT_TAB_BACKGROUND_OPACITY))
+            }),
+        tab_git_deleted_background: this
+            .tab_git_deleted_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok())
+            .or_else(|| {
+                version_control_deleted.map(|color| color.opacity(GIT_TAB_BACKGROUND_OPACITY))
+            }),
+        tab_git_conflict_background: this
+            .tab_git_conflict_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok())
+            .or_else(|| {
+                version_control_conflict.map(|color| color.opacity(GIT_TAB_BACKGROUND_OPACITY))
+            }),
+        panel_git_added_background: this
+            .panel_git_added_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok())
+            .or_else(|| {
+                version_control_added.map(|color| color.opacity(GIT_PANEL_BACKGROUND_OPACITY))
+            }),
+        panel_git_modified_background: this
+            .panel_git_modified_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok())
+            .or_else(|| {
+                version_control_modified.map(|color| color.opacity(GIT_PANEL_BACKGROUND_OPACITY))
+            }),
+        panel_git_deleted_background: this
+            .panel_git_deleted_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok())
+            .or_else(|| {
+                version_control_deleted.map(|color| color.opacity(GIT_PANEL_BACKGROUND_OPACITY))
+            }),
+        panel_git_conflict_background: this
+            .panel_git_conflict_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok())
+            .or_else(|| {
+                version_control_conflict.map(|color| color.opacity(GIT_PANEL_BACKGROUND_OPACITY))
+            }),
         search_match_background,
         search_active_match_background,
         panel_background,
@@ -763,21 +832,13 @@ pub fn theme_colors_refinement(
             .and_then(|color| try_parse_color(color).ok()),
         version_control_added,
         version_control_deleted,
-        version_control_modified: this
-            .version_control_modified
-            .as_ref()
-            .and_then(|color| try_parse_color(color).ok())
-            .or(status_colors.modified),
+        version_control_modified,
         version_control_renamed: this
             .version_control_renamed
             .as_ref()
             .and_then(|color| try_parse_color(color).ok())
             .or(status_colors.modified),
-        version_control_conflict: this
-            .version_control_conflict
-            .as_ref()
-            .and_then(|color| try_parse_color(color).ok())
-            .or(status_colors.ignored),
+        version_control_conflict,
         version_control_ignored: this
             .version_control_ignored
             .as_ref()
@@ -1002,6 +1063,49 @@ mod tests {
         assert_eq!(
             refinement.editor_diff_hunk_deleted_hollow_border,
             Some(deleted.opacity(0.48))
+        );
+    }
+
+    #[test]
+    fn git_status_backgrounds_fallback_to_version_control_colors() {
+        use theme::{GIT_PANEL_BACKGROUND_OPACITY, GIT_TAB_BACKGROUND_OPACITY};
+
+        let mut colors = ThemeColorsContent::default();
+        colors.version_control_added = Some("#00ff00".into());
+        colors.version_control_modified = Some("#ffff00".into());
+        colors.version_control_deleted = Some("#ff0000".into());
+        colors.version_control_conflict = Some("#ff8800".into());
+        colors.panel_git_modified_background = Some("#123456".into());
+
+        let refinement = theme_colors_refinement(
+            &colors,
+            &status_colors_refinement(&StatusColorsContent::default()),
+            false,
+        );
+
+        assert_eq!(
+            refinement.tab_git_added_background,
+            Some(parse_color("#00ff00").opacity(GIT_TAB_BACKGROUND_OPACITY))
+        );
+        assert_eq!(
+            refinement.tab_git_modified_background,
+            Some(parse_color("#ffff00").opacity(GIT_TAB_BACKGROUND_OPACITY))
+        );
+        assert_eq!(
+            refinement.tab_git_deleted_background,
+            Some(parse_color("#ff0000").opacity(GIT_TAB_BACKGROUND_OPACITY))
+        );
+        assert_eq!(
+            refinement.tab_git_conflict_background,
+            Some(parse_color("#ff8800").opacity(GIT_TAB_BACKGROUND_OPACITY))
+        );
+        assert_eq!(
+            refinement.panel_git_added_background,
+            Some(parse_color("#00ff00").opacity(GIT_PANEL_BACKGROUND_OPACITY))
+        );
+        assert_eq!(
+            refinement.panel_git_modified_background,
+            Some(parse_color("#123456"))
         );
     }
 

@@ -1,35 +1,46 @@
 #![allow(unused, dead_code)]
 use std::future::Future;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context as _, Result};
+use buffer_diff::{BufferDiff, BufferDiffEvent};
 use client::proto::ViewId;
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use editor::DisplayPoint;
 use feature_flags::{FeatureFlagAppExt as _, NotebookFeatureFlag};
 use futures::FutureExt;
 use futures::future::Shared;
 use gpui::{
-    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, ListScrollEvent,
-    ListState, Point, Task, TaskExt, actions, list, prelude::*,
+    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, Global, KeyContext,
+    ListScrollEvent, ListState, Point, Subscription, Task, TaskExt, actions, list, prelude::*,
 };
 use jupyter_protocol::JupyterKernelspec;
-use language::{Language, LanguageRegistry};
+use language::{Buffer, Language, LanguageRegistry};
 use log;
 use project::{Project, ProjectEntryId, ProjectPath};
-use settings::Settings as _;
+use settings::{Settings as _, SettingsStore};
 use ui::{CommonAnimationExt, KeyBinding, Tooltip, prelude::*};
 use workspace::item::{ItemEvent, SaveOptions, TabContentParams};
 use workspace::searchable::SearchableItemHandle;
 use workspace::{Item, ItemHandle, Pane, ProjectItem, ToolbarItemLocation};
 
+use super::code_document::{
+    ScriptCell, ScriptCellKind, cells_to_script, code_cell_sources, layout_code_cells,
+    script_to_cells,
+};
+use super::file_format::NotebookFile;
 use super::{Cell, CellEvent, CellPosition, MarkdownCellEvent, RenderableCell};
 
 use nbformat::v4::CellId;
 use nbformat::v4::Metadata as NotebookMetadata;
 use serde_json;
+use util::ResultExt as _;
 use uuid::Uuid;
 
+use crate::JupyterSettings;
 use crate::components::{KernelPickerDelegate, KernelSelector};
 use crate::kernels::{
     Kernel, KernelSession, KernelSpecification, KernelStatus, LocalKernelSpecification,
@@ -45,7 +56,7 @@ use zed_actions::editor::{MoveDown, MoveUp};
 use zed_actions::notebook::{
     AddCodeBlock, AddMarkdownBlock, ClearOutputs, DeleteCell, EnterCommandMode, EnterEditMode,
     InterruptKernel, MoveCellDown, MoveCellUp, NotebookMoveDown, NotebookMoveUp, OpenNotebook,
-    RestartKernel, Run, RunAll, RunAndAdvance,
+    RestartKernel, Run, RunAll, RunAndAdvance, ToggleSourceView,
 };
 
 /// Whether the notebook is in command mode (navigating cells) or edit mode (editing a cell).
@@ -70,20 +81,157 @@ pub(crate) const CODE_BLOCK_INSET: f32 = MEDIUM_SPACING_SIZE;
 pub(crate) const CONTROL_SIZE: f32 = 20.0;
 
 const NOTEBOOK_EXTENSION: &str = "ipynb";
+/// Used for the cell markers in the shared code buffer until the notebook's
+/// language has loaded. Most kernel languages comment with `#`.
+const DEFAULT_COMMENT_PREFIX: &str = "# ";
 
-pub fn init(cx: &mut App) {
-    if cx.has_flag::<NotebookFeatureFlag>() || std::env::var("LOCAL_NOTEBOOK_DEV").is_ok() {
-        workspace::register_project_item::<NotebookEditor>(cx);
+/// Marks the notebook editor as registered. Registration can be triggered by the
+/// feature flag and by the setting, and registering twice would add a second
+/// opener for `.ipynb` files.
+struct NotebookEditorRegistered;
+
+impl Global for NotebookEditorRegistered {}
+
+fn register_notebook_editor(cx: &mut App) {
+    if cx.has_global::<NotebookEditorRegistered>() {
+        return;
+    }
+    workspace::register_project_item::<NotebookEditor>(cx);
+    cx.set_global(NotebookEditorRegistered);
+}
+
+/// The sidecar files currently backing an open notebook editor.
+#[derive(Default)]
+struct NotebookSidecars(HashSet<PathBuf>);
+
+impl Global for NotebookSidecars {}
+
+/// The hidden file next to `notebook_path` that backs its code cells, such as
+/// `.analysis.ipynb.py` for `analysis.ipynb`.
+fn sidecar_path(notebook_path: &Path, extension: &str) -> Option<PathBuf> {
+    let file_name = notebook_path.file_name()?.to_str()?;
+    Some(notebook_path.with_file_name(format!(".{file_name}.{extension}")))
+}
+
+/// For each cell of `new`, the index of the cell of `old` it continues, if any.
+///
+/// Cells that are unchanged are matched first, as the longest common
+/// subsequence of the two lists. Between those, edited cells are matched by
+/// position when they are of the same kind, so that editing a cell's text in the
+/// source view keeps its id and outputs. Remaining cells reuse an unmatched old
+/// cell with identical text, which covers cells that were moved.
+fn align_cells(old: &[ScriptCell], new: &[ScriptCell]) -> Vec<Option<usize>> {
+    let mut lengths = vec![vec![0usize; new.len() + 1]; old.len() + 1];
+    for old_index in (0..old.len()).rev() {
+        for new_index in (0..new.len()).rev() {
+            lengths[old_index][new_index] = if old[old_index] == new[new_index] {
+                lengths[old_index + 1][new_index + 1] + 1
+            } else {
+                lengths[old_index + 1][new_index].max(lengths[old_index][new_index + 1])
+            };
+        }
     }
 
-    cx.observe_flag::<NotebookFeatureFlag, _>({
-        move |flag, cx| {
-            if *flag {
-                workspace::register_project_item::<NotebookEditor>(cx);
-            } else {
-                // todo: there is no way to unregister a project item, so if the feature flag
-                // gets turned off they need to restart Zed.
+    let mut matches = Vec::new();
+    let (mut old_index, mut new_index) = (0, 0);
+    while old_index < old.len() && new_index < new.len() {
+        if old[old_index] == new[new_index] {
+            matches.push((old_index, new_index));
+            old_index += 1;
+            new_index += 1;
+        } else if lengths[old_index + 1][new_index] >= lengths[old_index][new_index + 1] {
+            old_index += 1;
+        } else {
+            new_index += 1;
+        }
+    }
+
+    let mut assignment = vec![None; new.len()];
+    let (mut old_start, mut new_start) = (0, 0);
+    for (old_end, new_end) in matches
+        .iter()
+        .copied()
+        .chain(std::iter::once((old.len(), new.len())))
+    {
+        for (old_index, new_index) in (old_start..old_end).zip(new_start..new_end) {
+            if old[old_index].kind == new[new_index].kind {
+                assignment[new_index] = Some(old_index);
             }
+        }
+        if new_end < new.len() {
+            assignment[new_end] = Some(old_end);
+        }
+        old_start = old_end + 1;
+        new_start = new_end + 1;
+    }
+
+    // A cell moved past others isn't part of the common subsequence; it is still
+    // the same cell wherever its unchanged text turns up.
+    let mut used = vec![false; old.len()];
+    for old_index in assignment.iter().flatten() {
+        used[*old_index] = true;
+    }
+    for (new_index, slot) in assignment.iter_mut().enumerate() {
+        if slot.is_some() {
+            continue;
+        }
+        if let Some(old_index) =
+            (0..old.len()).find(|old_index| !used[*old_index] && old[*old_index] == new[new_index])
+        {
+            used[old_index] = true;
+            *slot = Some(old_index);
+        }
+    }
+    assignment
+}
+
+fn new_nbformat_cell(id: CellId, cell: &ScriptCell) -> nbformat::v4::Cell {
+    let metadata = nbformat::v4::CellMetadata::default();
+    let source = super::file_format::source_lines(&cell.source);
+    match cell.kind {
+        ScriptCellKind::Code => nbformat::v4::Cell::Code {
+            id,
+            metadata,
+            execution_count: None,
+            source,
+            outputs: Vec::new(),
+        },
+        ScriptCellKind::Markdown => nbformat::v4::Cell::Markdown {
+            id,
+            metadata,
+            source,
+            attachments: None,
+        },
+        ScriptCellKind::Raw => nbformat::v4::Cell::Raw {
+            id,
+            metadata,
+            source,
+        },
+    }
+}
+
+fn notebook_editor_enabled(cx: &App) -> bool {
+    JupyterSettings::get_global(cx).notebook_enabled
+        || cx.has_flag::<NotebookFeatureFlag>()
+        || std::env::var("LOCAL_NOTEBOOK_DEV").is_ok()
+}
+
+pub fn init(cx: &mut App) {
+    if notebook_editor_enabled(cx) {
+        register_notebook_editor(cx);
+    }
+
+    // There is no way to unregister a project item, so turning the notebook editor
+    // off again only takes effect after a restart.
+    cx.observe_flag::<NotebookFeatureFlag, _>(|flag, cx| {
+        if *flag {
+            register_notebook_editor(cx);
+        }
+    })
+    .detach();
+    cx.observe_global::<SettingsStore>(|cx| {
+        if JupyterSettings::get_global(cx).notebook_enabled {
+            register_notebook_editor(cx);
         }
     })
     .detach();
@@ -103,10 +251,40 @@ pub struct NotebookEditor {
     cell_order: Vec<CellId>,
     original_cell_order: Vec<CellId>,
     cell_map: HashMap<CellId, Cell>,
+    /// Every code cell's text, as one buffer that each cell editor shows an
+    /// excerpt of.
+    code_document: Entity<Buffer>,
+    comment_prefix: String,
+    _code_document_reparse: Task<()>,
+    /// The hidden file backing `code_document` for language servers, when
+    /// `jupyter.language_server_sidecar` is on.
+    sidecar_path: Option<PathBuf>,
+    _sidecar_task: Task<()>,
+    /// The whole notebook as one percent-format script, while the source view
+    /// is shown instead of the cells.
+    source_view: Option<SourceView>,
+    /// The shared code buffer's changes against the committed notebook, drawn in
+    /// each code cell's gutter.
+    code_diff: Option<Entity<BufferDiff>>,
+    /// The `.ipynb` file's own diff against HEAD, kept for its base text.
+    committed_diff: Option<Entity<BufferDiff>>,
+    /// The committed notebook's code cells, laid out like the shared code buffer.
+    committed_projection: Option<Arc<str>>,
+    _committed_diff_task: Task<()>,
+    _code_diff_update: Task<()>,
+    _code_document_subscription: Subscription,
+    _committed_diff_subscription: Option<Subscription>,
     kernel: Kernel,
     kernel_specification: Option<KernelSpecification>,
     execution_requests: HashMap<String, CellId>,
     kernel_picker_handle: PopoverMenuHandle<Picker<KernelPickerDelegate>>,
+}
+
+struct SourceView {
+    editor: Entity<editor::Editor>,
+    /// The script as it was last written from the cells, to tell whether the
+    /// source view has edits the cells don't have yet.
+    applied_script: String,
 }
 
 enum SaveDestination {
@@ -132,76 +310,21 @@ impl NotebookEditor {
             .spawn_in(window, async move |_, _| notebook_language.await)
             .shared();
 
-        let mut cell_order = vec![]; // Vec<CellId>
-        let mut cell_map = HashMap::default(); // HashMap<CellId, Cell>
-
-        let cell_count = notebook_item.read(cx).notebook.cells.len();
-        for index in 0..cell_count {
-            let cell = notebook_item.read(cx).notebook.cells[index].clone();
-            let cell_id = cell.id();
-            cell_order.push(cell_id.clone());
-            let cell_entity = Cell::load(&cell, &languages, notebook_language.clone(), window, cx);
-
-            match &cell_entity {
-                Cell::Code(code_cell) => {
-                    let cell_id_for_focus = cell_id.clone();
-                    cx.subscribe_in(code_cell, window, move |this, _cell, event, window, cx| {
-                        match event {
-                            CellEvent::Run(cell_id) => {
-                                this.execute_cell(cell_id.clone(), window, cx)
-                            }
-                            CellEvent::FocusedIn(_) => {
-                                this.select_cell_by_id(&cell_id_for_focus, cx)
-                            }
-                        }
-                    })
-                    .detach();
-
-                    let cell_id_for_editor = cell_id.clone();
-                    let editor = code_cell.read(cx).editor().clone();
-                    cx.subscribe(&editor, move |this, _editor, event, cx| {
-                        if let editor::EditorEvent::Focused = event {
-                            this.select_cell_by_id(&cell_id_for_editor, cx);
-                        }
-                    })
-                    .detach();
-                }
-                Cell::Markdown(markdown_cell) => {
-                    cx.subscribe(
-                        markdown_cell,
-                        move |_this, cell, event: &MarkdownCellEvent, cx| {
-                            match event {
-                                MarkdownCellEvent::FinishedEditing => {
-                                    cell.update(cx, |cell, cx| {
-                                        cell.reparse_markdown(cx);
-                                    });
-                                }
-                                MarkdownCellEvent::Run(_cell_id) => {
-                                    // run is handled separately by move_to_next_cell
-                                    // Just reparse here
-                                    cell.update(cx, |cell, cx| {
-                                        cell.reparse_markdown(cx);
-                                    });
-                                }
-                            }
-                        },
-                    )
-                    .detach();
-
-                    let cell_id_for_editor = cell_id.clone();
-                    let editor = markdown_cell.read(cx).editor().clone();
-                    cx.subscribe(&editor, move |this, _editor, event, cx| {
-                        if let editor::EditorEvent::Focused = event {
-                            this.select_cell_by_id(&cell_id_for_editor, cx);
-                        }
-                    })
-                    .detach();
-                }
-                Cell::Raw(_) => {}
-            }
-
-            cell_map.insert(cell_id.clone(), cell_entity);
-        }
+        let comment_prefix = DEFAULT_COMMENT_PREFIX.to_string();
+        let notebook = notebook_item.read(cx).notebook.clone();
+        let sources = code_cell_sources(&notebook.cells);
+        let layout = layout_code_cells(sources.iter().map(String::as_str), &comment_prefix);
+        let (code_document, code_document_reparse) =
+            super::new_cell_buffer(&layout.text, languages.clone(), cx);
+        let (cell_order, cell_map) = Self::load_cells(
+            &notebook.cells,
+            &languages,
+            &code_document,
+            layout.cell_ranges,
+            &project,
+            window,
+            cx,
+        );
 
         let notebook_handle = cx.entity().downgrade();
         let cell_count = cell_order.len();
@@ -223,13 +346,35 @@ impl NotebookEditor {
             cell_order: cell_order.clone(),
             original_cell_order: cell_order.clone(),
             cell_map: cell_map.clone(),
+            code_document,
+            comment_prefix,
+            _code_document_reparse: code_document_reparse,
+            sidecar_path: None,
+            _sidecar_task: Task::ready(()),
+            source_view: None,
+            code_diff: None,
+            committed_diff: None,
+            committed_projection: None,
+            _committed_diff_task: Task::ready(()),
+            _code_diff_update: Task::ready(()),
+            _code_document_subscription: Subscription::new(|| {}),
+            _committed_diff_subscription: None,
             kernel: Kernel::Shutdown,
             kernel_specification: None,
             execution_requests: HashMap::default(),
             kernel_picker_handle: PopoverMenuHandle::default(),
         };
+        for cell_id in cell_order {
+            if let Some(cell) = cell_map.get(&cell_id) {
+                editor.subscribe_to_cell(cell_id, cell, window, cx);
+            }
+        }
         editor.launch_kernel(window, cx);
         editor.refresh_language(cx);
+        editor.start_sidecar(cx);
+        editor.observe_code_document(cx);
+        editor.start_diff(cx);
+        cx.on_release(|this, cx| this.remove_sidecar(cx)).detach();
         editor.refresh_kernelspecs(cx);
 
         cx.subscribe(&notebook_item, |this, _item, _event, cx| {
@@ -258,18 +403,486 @@ impl NotebookEditor {
             let language = notebook_language.await;
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
-                    for cell in this.cell_map.values() {
-                        if let Cell::Code(code_cell) = cell {
-                            code_cell.update(cx, |cell, cx| {
-                                cell.set_language(language.clone(), cx);
-                            });
-                        }
+                    let comment_prefix = language
+                        .as_ref()
+                        .and_then(|language| language.config().line_comments.first().cloned())
+                        .map_or_else(
+                            || DEFAULT_COMMENT_PREFIX.to_string(),
+                            |prefix| prefix.to_string(),
+                        );
+                    this.code_document.update(cx, |document, cx| {
+                        document.set_language(language.clone(), cx);
+                    });
+                    if comment_prefix != this.comment_prefix {
+                        this.comment_prefix = comment_prefix;
+                        this.rebuild_code_document(cx);
+                        this.refresh_committed_projection(cx);
                     }
                 });
             }
             language
         });
         self.notebook_language = task.shared();
+    }
+
+    fn load_cells(
+        cells: &[nbformat::v4::Cell],
+        languages: &Arc<LanguageRegistry>,
+        code_document: &Entity<Buffer>,
+        code_ranges: Vec<std::ops::Range<language::Point>>,
+        project: &Entity<Project>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (Vec<CellId>, HashMap<CellId, Cell>) {
+        let mut code_ranges = code_ranges.into_iter();
+        let mut cell_order = Vec::with_capacity(cells.len());
+        let mut cell_map = HashMap::default();
+        for cell in cells {
+            let code_range = match cell {
+                nbformat::v4::Cell::Code { .. } => code_ranges.next(),
+                _ => None,
+            };
+            let cell_entity = Cell::load(
+                cell,
+                languages,
+                code_document,
+                code_range,
+                project,
+                window,
+                cx,
+            );
+            cell_order.push(cell.id().clone());
+            cell_map.insert(cell.id().clone(), cell_entity);
+        }
+        (cell_order, cell_map)
+    }
+
+    /// Moves the shared code buffer onto a hidden file next to the notebook, since
+    /// language servers only attach to buffers backed by a file.
+    fn start_sidecar(&mut self, cx: &mut Context<Self>) {
+        let project = self.project.read(cx);
+        if !JupyterSettings::get_global(cx).language_server_sidecar || !project.is_local() {
+            return;
+        }
+        let Some(notebook_path) =
+            project.absolute_path(&self.notebook_item.read(cx).project_path, cx)
+        else {
+            return;
+        };
+        let fs = project.fs().clone();
+        let project = self.project.clone();
+        let notebook_language = self.notebook_language.clone();
+
+        self._sidecar_task = cx.spawn(async move |this, cx| {
+            let result = async {
+                let Some(language) = notebook_language.await else {
+                    return anyhow::Ok(());
+                };
+                let Some(path) = language
+                    .path_suffixes()
+                    .first()
+                    .and_then(|extension| sidecar_path(&notebook_path, extension))
+                else {
+                    return Ok(());
+                };
+                // A second editor for the same notebook, such as a split, keeps an
+                // in-memory buffer: two editors rewriting one file would clobber
+                // each other's cells.
+                let claimed = cx.update(|cx| {
+                    cx.default_global::<NotebookSidecars>()
+                        .0
+                        .insert(path.clone())
+                });
+                if !claimed {
+                    return Ok(());
+                }
+                let text = this.update(cx, |this, cx| {
+                    this.sidecar_path = Some(path.clone());
+                    this.code_document.read(cx).text()
+                })?;
+
+                fs.atomic_write(path.clone(), text).await?;
+                let buffer = project
+                    .update(cx, |project, cx| project.open_local_buffer(&path, cx))
+                    .await?;
+                this.update(cx, |this, cx| {
+                    this.code_document = buffer;
+                    this.observe_code_document(cx);
+                    this.rebuild_code_document(cx);
+                })
+            }
+            .await;
+            result
+                .context("failed to create the notebook's language server file")
+                .log_err();
+        });
+    }
+
+    fn observe_code_document(&mut self, cx: &mut Context<Self>) {
+        self._code_document_subscription =
+            cx.subscribe(&self.code_document, |this, _, event, cx| {
+                if let language::BufferEvent::Edited { .. } = event {
+                    this.update_code_diff(cx);
+                }
+            });
+    }
+
+    fn start_diff(&mut self, cx: &mut Context<Self>) {
+        let project = self.project.clone();
+        let project_path = self.notebook_item.read(cx).project_path.clone();
+        self._committed_diff_task = cx.spawn(async move |this, cx| {
+            let result = async {
+                let buffer = project
+                    .update(cx, |project, cx| project.open_buffer(project_path, cx))
+                    .await?;
+                let committed_diff = project
+                    .update(cx, |project, cx| project.open_uncommitted_diff(buffer, cx))
+                    .await?;
+                this.update(cx, |this, cx| {
+                    this._committed_diff_subscription =
+                        Some(cx.subscribe(&committed_diff, |this, _, event, cx| {
+                            if let BufferDiffEvent::BaseTextChanged = event {
+                                this.refresh_committed_projection(cx);
+                            }
+                        }));
+                    this.committed_diff = Some(committed_diff);
+                    this.refresh_committed_projection(cx);
+                })
+            }
+            .await;
+            // Notebooks outside a git repository have nothing to diff against.
+            result.log_err();
+        });
+    }
+
+    fn refresh_committed_projection(&mut self, cx: &mut Context<Self>) {
+        let committed_text = self
+            .committed_diff
+            .as_ref()
+            .and_then(|diff| diff.read(cx).base_text_string(cx));
+        self.committed_projection = committed_text.and_then(|text| {
+            let (notebook, _) = NotebookFile::parse(&text)
+                .context("failed to parse the committed notebook")
+                .log_err()?;
+            let sources = code_cell_sources(&notebook.cells);
+            let layout =
+                layout_code_cells(sources.iter().map(String::as_str), &self.comment_prefix);
+            Some(Arc::from(layout.text))
+        });
+        self.update_code_diff(cx);
+    }
+
+    fn update_code_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(base_text) = self.committed_projection.clone() else {
+            return;
+        };
+        let snapshot = self.code_document.read(cx).text_snapshot();
+        let diff = match &self.code_diff {
+            Some(diff) if diff.read(cx).buffer_id == snapshot.remote_id() => diff.clone(),
+            _ => {
+                let language = self.code_document.read(cx).language().cloned();
+                let languages = self.languages.clone();
+                let diff = cx.new(|cx| BufferDiff::new(&snapshot, language, Some(languages), cx));
+                self.code_diff = Some(diff.clone());
+                diff
+            }
+        };
+        for code_cell in self.code_cells_in_order() {
+            code_cell.update(cx, |code_cell, cx| code_cell.set_diff(diff.clone(), cx));
+        }
+        // Replacing the task cancels a diff still being computed for older text.
+        self._code_diff_update = diff.update(cx, |diff, cx| {
+            diff.set_base_text(Some(base_text), snapshot, cx)
+        });
+    }
+
+    fn remove_sidecar(&mut self, cx: &mut App) {
+        let Some(path) = self.sidecar_path.take() else {
+            return;
+        };
+        cx.default_global::<NotebookSidecars>().0.remove(&path);
+        let fs = self.project.read(cx).fs().clone();
+        cx.background_spawn(async move {
+            fs.remove_file(
+                &path,
+                fs::RemoveOptions {
+                    recursive: false,
+                    ignore_if_not_exists: true,
+                },
+            )
+            .await
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Replaces every cell with `cells`, as when the file is reloaded from disk.
+    fn replace_cells(
+        &mut self,
+        cells: &[nbformat::v4::Cell],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sources = code_cell_sources(cells);
+        let layout = layout_code_cells(sources.iter().map(String::as_str), &self.comment_prefix);
+        self.code_document.update(cx, |document, cx| {
+            document.set_text(layout.text, cx);
+        });
+        let (cell_order, cell_map) = Self::load_cells(
+            cells,
+            &self.languages,
+            &self.code_document,
+            layout.cell_ranges,
+            &self.project,
+            window,
+            cx,
+        );
+        for cell_id in &cell_order {
+            if let Some(cell) = cell_map.get(cell_id) {
+                self.subscribe_to_cell(cell_id.clone(), cell, window, cx);
+            }
+        }
+
+        self.cell_order = cell_order.clone();
+        self.original_cell_order = cell_order;
+        self.cell_map = cell_map;
+        self.selected_cell_index = self
+            .selected_cell_index
+            .min(self.cell_order.len().saturating_sub(1));
+        self.cell_list = ListState::new(self.cell_order.len(), gpui::ListAlignment::Top, px(1000.));
+        cx.notify();
+    }
+
+    fn subscribe_to_cell(
+        &mut self,
+        cell_id: CellId,
+        cell: &Cell,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match cell {
+            Cell::Code(code_cell) => {
+                let cell_id_for_focus = cell_id.clone();
+                cx.subscribe_in(
+                    code_cell,
+                    window,
+                    move |this, _cell, event, window, cx| match event {
+                        CellEvent::Run(cell_id) => this.execute_cell(cell_id.clone(), window, cx),
+                        CellEvent::FocusedIn(_) => this.select_cell_by_id(&cell_id_for_focus, cx),
+                    },
+                )
+                .detach();
+
+                let editor = code_cell.read(cx).editor().clone();
+                cx.subscribe(&editor, move |this, _editor, event, cx| {
+                    if let editor::EditorEvent::Focused = event {
+                        this.select_cell_by_id(&cell_id, cx);
+                    }
+                })
+                .detach();
+            }
+            Cell::Markdown(markdown_cell) => {
+                cx.subscribe(
+                    markdown_cell,
+                    move |_this, cell, event: &MarkdownCellEvent, cx| match event {
+                        MarkdownCellEvent::FinishedEditing | MarkdownCellEvent::Run(_) => {
+                            cell.update(cx, |cell, cx| {
+                                cell.reparse_markdown(cx);
+                            });
+                        }
+                    },
+                )
+                .detach();
+
+                let editor = markdown_cell.read(cx).editor().clone();
+                cx.subscribe(&editor, move |this, _editor, event, cx| {
+                    if let editor::EditorEvent::Focused = event {
+                        this.select_cell_by_id(&cell_id, cx);
+                    }
+                })
+                .detach();
+            }
+            Cell::Raw(_) => {}
+        }
+    }
+
+    /// Rewrites the shared code buffer from the code cells in their current
+    /// order, after cells were added, removed or reordered, and points each cell
+    /// editor at its new range.
+    fn rebuild_code_document(&mut self, cx: &mut Context<Self>) {
+        let sources: Vec<String> = self
+            .code_cells_in_order()
+            .iter()
+            .map(|code_cell| code_cell.read(cx).current_source(cx))
+            .collect();
+        self.rewrite_code_document(sources, cx);
+    }
+
+    fn code_cells_in_order(&self) -> Vec<Entity<super::CodeCell>> {
+        self.cell_order
+            .iter()
+            .filter_map(|cell_id| match self.cell_map.get(cell_id) {
+                Some(Cell::Code(code_cell)) => Some(code_cell.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Like `rebuild_code_document`, but with `sources` as the text of the code
+    /// cells, in order.
+    fn rewrite_code_document(&mut self, sources: Vec<String>, cx: &mut Context<Self>) {
+        let code_cells = self.code_cells_in_order();
+        let layout = layout_code_cells(sources.iter().map(String::as_str), &self.comment_prefix);
+
+        self.code_document.update(cx, |document, cx| {
+            document.set_text(layout.text, cx);
+        });
+        for (code_cell, range) in code_cells.iter().zip(layout.cell_ranges) {
+            let document = self.code_document.clone();
+            code_cell.update(cx, |code_cell, cx| {
+                code_cell.set_document_range(document, range, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn script_cells(&self, cx: &App) -> Vec<ScriptCell> {
+        self.cell_order
+            .iter()
+            .filter_map(|cell_id| self.cell_map.get(cell_id))
+            .map(|cell| ScriptCell {
+                kind: match cell {
+                    Cell::Code(_) => ScriptCellKind::Code,
+                    Cell::Markdown(_) => ScriptCellKind::Markdown,
+                    Cell::Raw(_) => ScriptCellKind::Raw,
+                },
+                source: cell.current_source(cx),
+            })
+            .collect()
+    }
+
+    fn is_in_source_view(&self) -> bool {
+        self.source_view.is_some()
+    }
+
+    fn toggle_source_view(
+        &mut self,
+        _: &ToggleSourceView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.source_view.is_some() {
+            self.apply_source_view(window, cx);
+            self.source_view = None;
+            self.notebook_mode = NotebookMode::Command;
+            window.focus(&self.focus_handle, cx);
+            cx.notify();
+            return;
+        }
+
+        let script = cells_to_script(&self.script_cells(cx), &self.comment_prefix);
+        let language = self.code_document.read(cx).language().cloned();
+        let languages = self.languages.clone();
+        let buffer = cx.new(|cx| {
+            let mut buffer = Buffer::local(script.clone(), cx);
+            buffer.set_language_registry(languages);
+            buffer.set_language(language, cx);
+            buffer
+        });
+        let project = self.project.clone();
+        let editor = cx.new(|cx| {
+            let multi_buffer = cx.new(|cx| editor::MultiBuffer::singleton(buffer, cx));
+            editor::Editor::new(
+                editor::EditorMode::full(),
+                multi_buffer,
+                Some(project),
+                window,
+                cx,
+            )
+        });
+        window.focus(&editor.focus_handle(cx), cx);
+        self.source_view = Some(SourceView {
+            editor,
+            applied_script: script,
+        });
+        self.notebook_mode = NotebookMode::Edit;
+        cx.notify();
+    }
+
+    fn source_view_has_edits(&self, cx: &App) -> bool {
+        self.source_view.as_ref().is_some_and(|source_view| {
+            source_view.editor.read(cx).text(cx) != source_view.applied_script
+        })
+    }
+
+    /// Rebuilds the cells from the source view's script. Cells that line up with
+    /// a cell of the same kind keep their id and outputs, so editing the script
+    /// doesn't throw away results.
+    fn apply_source_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(source_view) = self.source_view.as_mut() else {
+            return;
+        };
+        let script = source_view.editor.read(cx).text(cx);
+        if script == source_view.applied_script {
+            return;
+        }
+        source_view.applied_script = script.clone();
+
+        let new_cells = script_to_cells(&script, &self.comment_prefix);
+        let old_cells = self.script_cells(cx);
+        let reused = align_cells(&old_cells, &new_cells);
+
+        let mut cell_order = Vec::with_capacity(new_cells.len());
+        let mut cell_map = HashMap::default();
+        let mut code_sources = Vec::new();
+        for (new_cell, old_index) in new_cells.iter().zip(reused) {
+            if new_cell.kind == ScriptCellKind::Code {
+                code_sources.push(new_cell.source.clone());
+            }
+            let reused_cell = old_index
+                .and_then(|index| self.cell_order.get(index))
+                .and_then(|cell_id| Some((cell_id.clone(), self.cell_map.get(cell_id)?.clone())));
+            if let Some((cell_id, cell)) = reused_cell {
+                match &cell {
+                    Cell::Markdown(markdown_cell) => {
+                        if markdown_cell.read(cx).current_source(cx) != new_cell.source {
+                            markdown_cell.update(cx, |markdown_cell, cx| {
+                                markdown_cell.set_source(&new_cell.source, window, cx)
+                            });
+                        }
+                    }
+                    Cell::Raw(raw_cell) => {
+                        raw_cell.update(cx, |raw_cell, _| raw_cell.set_source(&new_cell.source));
+                    }
+                    // Code cells get their text when the shared buffer is rewritten.
+                    Cell::Code(_) => {}
+                }
+                cell_order.push(cell_id.clone());
+                cell_map.insert(cell_id, cell);
+            } else {
+                let cell_id: CellId = Uuid::new_v4().into();
+                let nbformat_cell = new_nbformat_cell(cell_id.clone(), new_cell);
+                let cell = Cell::load(
+                    &nbformat_cell,
+                    &self.languages,
+                    &self.code_document,
+                    None,
+                    &self.project,
+                    window,
+                    cx,
+                );
+                self.subscribe_to_cell(cell_id.clone(), &cell, window, cx);
+                cell_order.push(cell_id.clone());
+                cell_map.insert(cell_id, cell);
+            }
+        }
+
+        self.cell_order = cell_order;
+        self.cell_map = cell_map;
+        self.selected_cell_index = self
+            .selected_cell_index
+            .min(self.cell_order.len().saturating_sub(1));
+        self.cell_list = ListState::new(self.cell_order.len(), gpui::ListAlignment::Top, px(1000.));
+        self.rewrite_code_document(code_sources, cx);
     }
 
     fn has_structural_changes(&self) -> bool {
@@ -307,19 +920,7 @@ impl NotebookEditor {
         for cell in self.cell_map.values() {
             match cell {
                 Cell::Code(code_cell) => {
-                    code_cell.update(cx, |code_cell, cx| {
-                        let editor = code_cell.editor();
-                        editor.update(cx, |editor, cx| {
-                            editor.buffer().update(cx, |buffer, cx| {
-                                if let Some(buf) = buffer.as_singleton() {
-                                    buf.update(cx, |b, cx| {
-                                        let version = b.version();
-                                        b.did_save(version, None, cx);
-                                    });
-                                }
-                            });
-                        });
-                    });
+                    code_cell.update(cx, |code_cell, cx| code_cell.mark_as_saved(cx));
                 }
                 Cell::Markdown(markdown_cell) => {
                     markdown_cell.update(cx, |markdown_cell, cx| {
@@ -336,7 +937,9 @@ impl NotebookEditor {
                         });
                     });
                 }
-                Cell::Raw(_) => {}
+                Cell::Raw(raw_cell) => {
+                    raw_cell.update(cx, |raw_cell, _| raw_cell.mark_as_saved());
+                }
             }
         }
         cx.notify();
@@ -350,12 +953,18 @@ impl NotebookEditor {
     ) -> Task<Result<()>> {
         let notebook = self.to_notebook(cx);
         let project_path = self.notebook_item.read(cx).project_path.clone();
+        let json = match self
+            .notebook_item
+            .update(cx, |item, _| item.file.serialize(&notebook))
+            .context("Failed to serialize notebook")
+        {
+            Ok(json) => json,
+            Err(error) => return Task::ready(Err(error)),
+        };
 
         self.mark_as_saved(cx);
 
         cx.spawn(async move |this, cx| {
-            let json =
-                serde_json::to_string_pretty(&notebook).context("Failed to serialize notebook")?;
             let buffer = project
                 .update(cx, |project, cx| project.open_buffer(project_path, cx))
                 .await?;
@@ -574,12 +1183,7 @@ impl NotebookEditor {
 
     fn execute_cell(&mut self, cell_id: CellId, window: &mut Window, cx: &mut Context<Self>) {
         let code = if let Some(Cell::Code(cell)) = self.cell_map.get(&cell_id) {
-            let editor = cell.read(cx).editor().clone();
-            let buffer = editor.read(cx).buffer().read(cx);
-            buffer
-                .as_singleton()
-                .map(|b| b.read(cx).text())
-                .unwrap_or_default()
+            cell.read(cx).current_source(cx)
         } else {
             return;
         };
@@ -652,12 +1256,16 @@ impl NotebookEditor {
     }
 
     fn run_cells(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_source_view(window, cx);
         for cell_id in self.cell_order.clone() {
             self.execute_cell(cell_id, window, cx);
         }
     }
 
     fn run_current_cell(&mut self, _: &Run, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_in_source_view() {
+            return;
+        }
         let Some(cell_id) = self.cell_order.get(self.selected_cell_index).cloned() else {
             return;
         };
@@ -683,6 +1291,9 @@ impl NotebookEditor {
     }
 
     fn run_and_advance(&mut self, _: &RunAndAdvance, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_in_source_view() {
+            return;
+        }
         if let Some(cell_id) = self.cell_order.get(self.selected_cell_index).cloned() {
             if let Some(cell) = self.cell_map.get(&cell_id) {
                 match cell {
@@ -711,6 +1322,9 @@ impl NotebookEditor {
     }
 
     fn enter_edit_mode(&mut self, _: &EnterEditMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_in_source_view() {
+            return;
+        }
         self.notebook_mode = NotebookMode::Edit;
         if let Some(cell_id) = self.cell_order.get(self.selected_cell_index) {
             if let Some(cell) = self.cell_map.get(cell_id) {
@@ -798,33 +1412,47 @@ impl NotebookEditor {
     }
 
     fn move_cell_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The cells are stale while the source view has edits; these act on
+        // cells, so they wait until the cell view is back.
+        if self.is_in_source_view() {
+            return;
+        }
         println!("Move cell up triggered");
         if self.selected_cell_index > 0 {
             self.cell_order
                 .swap(self.selected_cell_index, self.selected_cell_index - 1);
             self.selected_cell_index -= 1;
-            cx.notify();
+            self.rebuild_code_document(cx);
         }
     }
 
     fn move_cell_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_in_source_view() {
+            return;
+        }
         println!("Move cell down triggered");
         if !self.cell_order.is_empty() && self.selected_cell_index < self.cell_order.len() - 1 {
             self.cell_order
                 .swap(self.selected_cell_index, self.selected_cell_index + 1);
             self.selected_cell_index += 1;
-            cx.notify();
+            self.rebuild_code_document(cx);
         }
     }
 
     fn delete_cell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_in_source_view() {
+            return;
+        }
         if self.cell_order.is_empty() {
             return;
         }
         let index = self.selected_cell_index.min(self.cell_order.len() - 1);
         let cell_id = self.cell_order.remove(index);
-        self.cell_map.remove(&cell_id);
+        let removed_code_cell = matches!(self.cell_map.remove(&cell_id), Some(Cell::Code(_)));
         self.cell_list.splice(index..index + 1, 0);
+        if removed_code_cell {
+            self.rebuild_code_document(cx);
+        }
 
         if self.cell_order.is_empty() {
             self.selected_cell_index = 0;
@@ -852,6 +1480,9 @@ impl NotebookEditor {
     }
 
     fn add_markdown_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_in_source_view() {
+            return;
+        }
         let new_cell_id: CellId = Uuid::new_v4().into();
         let languages = self.languages.clone();
         let metadata: nbformat::v4::CellMetadata =
@@ -868,26 +1499,12 @@ impl NotebookEditor {
             )
         });
 
-        cx.subscribe(
-            &markdown_cell,
-            move |_this, cell, event: &MarkdownCellEvent, cx| match event {
-                MarkdownCellEvent::FinishedEditing | MarkdownCellEvent::Run(_) => {
-                    cell.update(cx, |cell, cx| {
-                        cell.reparse_markdown(cx);
-                    });
-                }
-            },
-        )
-        .detach();
-
-        let cell_id_for_editor = new_cell_id.clone();
-        let editor = markdown_cell.read(cx).editor().clone();
-        cx.subscribe(&editor, move |this, _editor, event, cx| {
-            if let editor::EditorEvent::Focused = event {
-                this.select_cell_by_id(&cell_id_for_editor, cx);
-            }
-        })
-        .detach();
+        self.subscribe_to_cell(
+            new_cell_id.clone(),
+            &Cell::Markdown(markdown_cell.clone()),
+            window,
+            cx,
+        );
 
         self.insert_cell_at_current_position(new_cell_id, Cell::Markdown(markdown_cell.clone()));
         markdown_cell.update(cx, |cell, cx| {
@@ -901,46 +1518,36 @@ impl NotebookEditor {
     }
 
     fn add_code_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_in_source_view() {
+            return;
+        }
         let new_cell_id: CellId = Uuid::new_v4().into();
-        let languages = self.languages.clone();
-        let notebook_language = self.notebook_language.clone();
         let metadata: nbformat::v4::CellMetadata =
             serde_json::from_str("{}").expect("empty object should parse");
+        let code_document = self.code_document.clone();
+        let project = self.project.clone();
 
         let code_cell = cx.new(|cx| {
             super::CodeCell::new(
                 super::CellSource::None,
                 new_cell_id.clone(),
                 metadata,
-                String::new(),
-                languages,
-                notebook_language,
+                code_document,
+                None,
+                Some(project),
                 window,
                 cx,
             )
         });
-
-        let cell_id_for_run = new_cell_id.clone();
-        cx.subscribe_in(
-            &code_cell,
+        self.subscribe_to_cell(
+            new_cell_id.clone(),
+            &Cell::Code(code_cell.clone()),
             window,
-            move |this, _cell, event, window, cx| match event {
-                CellEvent::Run(cell_id) => this.execute_cell(cell_id.clone(), window, cx),
-                CellEvent::FocusedIn(_) => this.select_cell_by_id(&cell_id_for_run, cx),
-            },
-        )
-        .detach();
-
-        let cell_id_for_editor = new_cell_id.clone();
-        let editor = code_cell.read(cx).editor().clone();
-        cx.subscribe(&editor, move |this, _editor, event, cx| {
-            if let editor::EditorEvent::Focused = event {
-                this.select_cell_by_id(&cell_id_for_editor, cx);
-            }
-        })
-        .detach();
+            cx,
+        );
 
         self.insert_cell_at_current_position(new_cell_id, Cell::Code(code_cell.clone()));
+        self.rebuild_code_document(cx);
         let editor = code_cell.read(cx).editor().clone();
         window.focus(&editor.focus_handle(cx), cx);
         self.notebook_mode = NotebookMode::Edit;
@@ -1467,6 +2074,14 @@ impl Render for NotebookEditor {
                 NotebookMode::Edit => "edit",
             },
         );
+        key_context.set(
+            "notebook_view",
+            if self.is_in_source_view() {
+                "source"
+            } else {
+                "cells"
+            },
+        );
 
         v_flex()
             .size_full()
@@ -1475,6 +2090,7 @@ impl Render for NotebookEditor {
             .on_action(cx.listener(|this, _: &OpenNotebook, window, cx| {
                 this.open_notebook(&OpenNotebook, window, cx)
             }))
+            .on_action(cx.listener(Self::toggle_source_view))
             .on_action(
                 cx.listener(|this, _: &ClearOutputs, window, cx| this.clear_outputs(window, cx)),
             )
@@ -1611,17 +2227,18 @@ impl Render for NotebookEditor {
                     .w_full()
                     .h_full()
                     .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .child(if self.cell_order.is_empty() {
-                                self.render_empty_state(cx).into_any_element()
-                            } else {
-                                self.cell_list(window, cx).into_any_element()
-                            }),
-                    )
-                    .child(self.render_notebook_controls(window, cx)),
+                    .child(div().flex_1().h_full().child(
+                        if let Some(source_view) = &self.source_view {
+                            source_view.editor.clone().into_any_element()
+                        } else if self.cell_order.is_empty() {
+                            self.render_empty_state(cx).into_any_element()
+                        } else {
+                            self.cell_list(window, cx).into_any_element()
+                        },
+                    ))
+                    .when(!self.is_in_source_view(), |this| {
+                        this.child(self.render_notebook_controls(window, cx))
+                    }),
             )
             .child(self.render_kernel_status_bar(window, cx))
     }
@@ -1639,6 +2256,8 @@ pub struct NotebookItem {
     languages: Arc<LanguageRegistry>,
     // Raw notebook data
     notebook: nbformat::v4::Notebook,
+    /// The JSON the notebook was last read from or written to.
+    file: NotebookFile,
     // Store our version of the notebook in memory (cell_order, cell_map)
     id: ProjectEntryId,
 }
@@ -1669,37 +2288,7 @@ impl project::ProjectItem for NotebookItem {
                     .update(cx, |project, cx| project.open_buffer(path.clone(), cx))
                     .await?;
                 let file_content = buffer.read_with(cx, |buffer, _| buffer.text());
-
-                let notebook = if file_content.trim().is_empty() {
-                    nbformat::v4::Notebook {
-                        nbformat: 4,
-                        nbformat_minor: 5,
-                        cells: vec![],
-                        metadata: serde_json::from_str("{}").unwrap(),
-                    }
-                } else {
-                    let notebook = match nbformat::parse_notebook(&file_content) {
-                        Ok(nb) => nb,
-                        Err(_) => {
-                            // Pre-process to ensure IDs exist
-                            let mut json: serde_json::Value = serde_json::from_str(&file_content)?;
-                            if let Some(cells) =
-                                json.get_mut("cells").and_then(|c| c.as_array_mut())
-                            {
-                                for cell in cells {
-                                    if cell.get("id").is_none() {
-                                        cell["id"] =
-                                            serde_json::Value::String(Uuid::new_v4().to_string());
-                                    }
-                                }
-                            }
-                            let file_content = serde_json::to_string(&json)?;
-                            nbformat::parse_notebook(&file_content)?
-                        }
-                    };
-
-                    upgrade_notebook(notebook)?
-                };
+                let (notebook, file) = NotebookFile::parse(&file_content)?;
 
                 let id = project
                     .update(cx, |project, cx| {
@@ -1711,6 +2300,7 @@ impl project::ProjectItem for NotebookItem {
                     project_path: path,
                     languages,
                     notebook,
+                    file,
                     id,
                 }))
             }))
@@ -1898,9 +2488,10 @@ impl Item for NotebookEditor {
         &mut self,
         _options: SaveOptions,
         project: Entity<Project>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
+        self.apply_source_view(window, cx);
         self.save_impl(SaveDestination::CurrentPath, project, cx)
     }
 
@@ -1908,9 +2499,10 @@ impl Item for NotebookEditor {
         &mut self,
         project: Entity<Project>,
         path: ProjectPath,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
+        self.apply_source_view(window, cx);
         self.save_impl(SaveDestination::NewPath(path), project, cx)
     }
 
@@ -1921,8 +2513,6 @@ impl Item for NotebookEditor {
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         let project_path = self.notebook_item.read(cx).project_path.clone();
-        let languages = self.languages.clone();
-        let notebook_language = self.notebook_language.clone();
 
         cx.spawn_in(window, async move |this, cx| {
             let buffer = this
@@ -1933,39 +2523,14 @@ impl Item for NotebookEditor {
                 .await?;
 
             let file_content = buffer.read_with(cx, |buffer, _| buffer.text());
-
-            let mut json: serde_json::Value = serde_json::from_str(&file_content)?;
-            if let Some(cells) = json.get_mut("cells").and_then(|c| c.as_array_mut()) {
-                for cell in cells {
-                    if cell.get("id").is_none() {
-                        cell["id"] = serde_json::Value::String(Uuid::new_v4().to_string());
-                    }
-                }
-            }
-            let file_content = serde_json::to_string(&json)?;
-
-            let notebook = nbformat::parse_notebook(&file_content)
-                .context("Failed to parse notebook")
-                .and_then(upgrade_notebook)?;
+            let (notebook, file) = NotebookFile::parse(&file_content)?;
 
             this.update_in(cx, |this, window, cx| {
-                let mut cell_order = vec![];
-                let mut cell_map = HashMap::default();
-
-                for cell in notebook.cells.iter() {
-                    let cell_id = cell.id();
-                    cell_order.push(cell_id.clone());
-                    let cell_entity =
-                        Cell::load(cell, &languages, notebook_language.clone(), window, cx);
-                    cell_map.insert(cell_id.clone(), cell_entity);
-                }
-
-                this.cell_order = cell_order.clone();
-                this.original_cell_order = cell_order;
-                this.cell_map = cell_map;
-                this.cell_list =
-                    ListState::new(this.cell_order.len(), gpui::ListAlignment::Top, px(1000.));
-                cx.notify();
+                this.notebook_item.update(cx, |item, _| {
+                    item.notebook.metadata = notebook.metadata.clone();
+                    item.file = file;
+                });
+                this.replace_cells(&notebook.cells, window, cx);
             })?;
 
             Ok(())
@@ -1973,7 +2538,9 @@ impl Item for NotebookEditor {
     }
 
     fn is_dirty(&self, cx: &App) -> bool {
-        self.has_structural_changes() || self.has_content_changes(cx)
+        self.has_structural_changes()
+            || self.has_content_changes(cx)
+            || self.source_view_has_edits(cx)
     }
 }
 
@@ -2031,19 +2598,6 @@ impl KernelSession for NotebookEditor {
     }
 }
 
-fn upgrade_notebook(notebook: nbformat::Notebook) -> anyhow::Result<nbformat::v4::Notebook> {
-    match notebook {
-        nbformat::Notebook::V4(notebook) => Ok(notebook),
-        nbformat::Notebook::V4QuirksMode(notebook) => {
-            log::warn!("Repairing notebook cell IDs: {:?}", notebook.quirks());
-            Ok(notebook.repair())
-        }
-        nbformat::Notebook::Legacy(notebook) => nbformat::upgrade_legacy_notebook(notebook),
-        nbformat::Notebook::V3(notebook) => nbformat::upgrade_v3_notebook(notebook),
-        _ => anyhow::bail!("Unsupported notebook format"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2053,6 +2607,23 @@ mod tests {
     use settings::SettingsStore;
     use util::path;
     use util::rel_path::rel_path;
+
+    fn code_cell_at(
+        notebook_editor: &Entity<NotebookEditor>,
+        index: usize,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Entity<super::super::CodeCell> {
+        notebook_editor.read_with(cx, |notebook_editor, _| {
+            let Some(Cell::Code(cell)) = notebook_editor
+                .cell_order
+                .get(index)
+                .and_then(|cell_id| notebook_editor.cell_map.get(cell_id))
+            else {
+                panic!("expected a code cell at index {index}");
+            };
+            cell.clone()
+        })
+    }
 
     const NOTEBOOK_WITH_ONE_CODE_CELL: &str = r#"{
         "metadata": {
@@ -2088,7 +2659,7 @@ mod tests {
             .remove("id");
         let notebook = nbformat::parse_notebook(&serde_json::to_string(&value)?)?;
         assert!(matches!(notebook, nbformat::Notebook::V4QuirksMode(_)));
-        let repaired = upgrade_notebook(notebook)?;
+        let repaired = crate::notebook::file_format::upgrade_notebook(notebook)?;
         let serialized = nbformat::serialize_notebook(&nbformat::Notebook::V4(repaired))?;
         assert!(matches!(
             nbformat::parse_notebook(&serialized)?,
@@ -2106,7 +2677,9 @@ mod tests {
 
     #[test]
     fn test_upgrade_notebook_preserves_cell_ids() -> anyhow::Result<()> {
-        let notebook = upgrade_notebook(nbformat::parse_notebook(NOTEBOOK_WITH_ONE_CODE_CELL)?)?;
+        let notebook = crate::notebook::file_format::upgrade_notebook(nbformat::parse_notebook(
+            NOTEBOOK_WITH_ONE_CODE_CELL,
+        )?)?;
         let value = serde_json::to_value(notebook)?;
         assert_eq!(value["cells"][0]["id"], "cell-one");
         Ok(())
@@ -2350,7 +2923,7 @@ mod tests {
             cx.new(|cx| NotebookEditor::new(project.clone(), notebook_item, window, cx))
         });
 
-        let cell_editor = notebook_editor.read_with(cx, |notebook_editor, cx| {
+        let cell = notebook_editor.read_with(cx, |notebook_editor, _| {
             let cell_id = notebook_editor
                 .cell_order
                 .first()
@@ -2358,11 +2931,9 @@ mod tests {
             let Some(Cell::Code(cell)) = notebook_editor.cell_map.get(cell_id) else {
                 panic!("expected a code cell");
             };
-            cell.read(cx).editor().clone()
+            cell.clone()
         });
-        cell_editor.update_in(cx, |cell_editor, window, cx| {
-            cell_editor.set_text("print('goodbye')", window, cx);
-        });
+        cell.update(cx, |cell, cx| cell.set_source("print('goodbye')", cx));
 
         notebook_editor
             .update_in(cx, |notebook_editor, window, cx| {
@@ -2389,5 +2960,516 @@ mod tests {
             );
             assert!(!buffer.is_dirty(), "saving should leave the buffer clean");
         });
+    }
+
+    /// Saving rewrites only what was edited: outputs the editor can't render, such
+    /// as widgets, and the file's own formatting survive a save.
+    #[gpui::test]
+    async fn test_saving_an_unedited_notebook_keeps_the_file(cx: &mut TestAppContext) {
+        const NOTEBOOK: &str = r##"{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "widget-cell",
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "8f1c",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "IntSlider(value=0)"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "import ipywidgets\n",
+    "ipywidgets.IntSlider()"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "widgets": {
+   "application/vnd.jupyter.widget-state+json": {
+    "state": {}
+   }
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+"##;
+
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/notebooks"), json!({ "test.ipynb": NOTEBOOK }))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/notebooks").as_ref()], cx).await;
+        cx.update(|cx| ReplStore::init(fs.clone(), cx));
+
+        let project_path = project.read_with(cx, |project, cx| ProjectPath {
+            worktree_id: project.worktrees(cx).next().unwrap().read(cx).id(),
+            path: rel_path("test.ipynb").into(),
+        });
+        let notebook_item = cx
+            .update(|cx| {
+                NotebookItem::try_open(&project, &project_path, cx)
+                    .expect("ipynb files should be openable as notebooks")
+            })
+            .await
+            .expect("notebook should parse");
+
+        let cx = cx.add_empty_window();
+        let notebook_editor = cx.update(|window, cx| {
+            cx.new(|cx| NotebookEditor::new(project.clone(), notebook_item, window, cx))
+        });
+
+        let save = |cx: &mut gpui::VisualTestContext| {
+            notebook_editor.update_in(cx, |notebook_editor, window, cx| {
+                notebook_editor.save(SaveOptions::default(), project.clone(), window, cx)
+            })
+        };
+        let read_saved = || {
+            String::from_utf8(
+                fs.read_file_sync(path!("/notebooks/test.ipynb"))
+                    .expect("notebook should still exist"),
+            )
+            .expect("notebook should be valid UTF-8")
+        };
+
+        save(cx).await.expect("saving the notebook should succeed");
+        assert_eq!(read_saved(), NOTEBOOK);
+
+        let cell = code_cell_at(&notebook_editor, 0, cx);
+        cell.update(cx, |cell, cx| {
+            cell.set_source("import ipywidgets\nipywidgets.IntSlider(5)", cx)
+        });
+        save(cx).await.expect("saving the notebook should succeed");
+
+        assert_eq!(
+            read_saved(),
+            NOTEBOOK.replace("\"ipywidgets.IntSlider()\"", "\"ipywidgets.IntSlider(5)\""),
+            "only the edited source line should change"
+        );
+    }
+
+    async fn open_notebook_editor<'a>(
+        contents: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (
+        Entity<NotebookEditor>,
+        &'a mut gpui::VisualTestContext,
+        Arc<FakeFs>,
+    ) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/notebooks"), json!({ "test.ipynb": contents }))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/notebooks").as_ref()], cx).await;
+        cx.update(|cx| ReplStore::init(fs.clone(), cx));
+
+        let project_path = project.read_with(cx, |project, cx| ProjectPath {
+            worktree_id: project.worktrees(cx).next().unwrap().read(cx).id(),
+            path: rel_path("test.ipynb").into(),
+        });
+        let notebook_item = cx
+            .update(|cx| {
+                NotebookItem::try_open(&project, &project_path, cx)
+                    .expect("ipynb files should be openable as notebooks")
+            })
+            .await
+            .expect("notebook should parse");
+
+        let cx = cx.add_empty_window();
+        let notebook_editor = cx.update(|window, cx| {
+            cx.new(|cx| NotebookEditor::new(project.clone(), notebook_item, window, cx))
+        });
+        (notebook_editor, cx, fs)
+    }
+
+    const NOTEBOOK_WITH_TWO_CODE_CELLS: &str = r#"{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "first",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import math"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "notes",
+   "metadata": {},
+   "source": [
+    "Some notes"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "second",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "math.pi"
+   ]
+  }
+ ],
+ "metadata": {},
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+"#;
+
+    #[gpui::test]
+    async fn test_code_cells_are_excerpts_of_one_buffer(cx: &mut TestAppContext) {
+        let (notebook_editor, cx, _fs) =
+            open_notebook_editor(NOTEBOOK_WITH_TWO_CODE_CELLS, cx).await;
+
+        let first = code_cell_at(&notebook_editor, 0, cx);
+        let second = code_cell_at(&notebook_editor, 2, cx);
+        cx.read(|cx| {
+            assert_eq!(
+                first.read(cx).document().entity_id(),
+                second.read(cx).document().entity_id(),
+            );
+            assert_eq!(
+                first.read(cx).document().read(cx).text(),
+                "# %%\nimport math\n# %%\nmath.pi"
+            );
+            assert_eq!(first.read(cx).current_source(cx), "import math");
+            assert_eq!(second.read(cx).current_source(cx), "math.pi");
+        });
+
+        second.update(cx, |cell, cx| cell.set_source("print(math.pi)", cx));
+        cx.read(|cx| {
+            assert_eq!(
+                first.read(cx).document().read(cx).text(),
+                "# %%\nimport math\n# %%\nprint(math.pi)"
+            );
+            assert_eq!(first.read(cx).current_source(cx), "import math");
+        });
+    }
+
+    #[gpui::test]
+    async fn test_reordering_and_adding_cells_rewrites_the_shared_buffer(cx: &mut TestAppContext) {
+        let (notebook_editor, cx, _fs) =
+            open_notebook_editor(NOTEBOOK_WITH_TWO_CODE_CELLS, cx).await;
+
+        notebook_editor.update_in(cx, |notebook_editor, window, cx| {
+            notebook_editor.selected_cell_index = 2;
+            notebook_editor.move_cell_up(window, cx);
+            notebook_editor.move_cell_up(window, cx);
+        });
+        let document =
+            code_cell_at(&notebook_editor, 0, cx).read_with(cx, |cell, _| cell.document().clone());
+        cx.read(|cx| {
+            assert_eq!(document.read(cx).text(), "# %%\nmath.pi\n# %%\nimport math");
+        });
+
+        notebook_editor.update_in(cx, |notebook_editor, window, cx| {
+            notebook_editor.selected_cell_index = 0;
+            notebook_editor.add_code_block(window, cx);
+        });
+        let added = code_cell_at(&notebook_editor, 1, cx);
+        added.update(cx, |cell, cx| cell.set_source("radius = 2", cx));
+        cx.read(|cx| {
+            assert_eq!(
+                document.read(cx).text(),
+                "# %%\nmath.pi\n# %%\nradius = 2\n# %%\nimport math"
+            );
+            assert_eq!(added.read(cx).current_source(cx), "radius = 2");
+        });
+    }
+
+    #[gpui::test]
+    async fn test_sidecar_file_backs_the_code_cells_while_open(cx: &mut TestAppContext) {
+        use fs::Fs as _;
+
+        const NOTEBOOK: &str = r#"{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "only",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "value = 1"
+   ]
+  }
+ ],
+ "metadata": {
+  "language_info": {
+   "name": "Python"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+"#;
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .editor
+                        .jupyter
+                        .get_or_insert_default()
+                        .language_server_sidecar = Some(true);
+                });
+            });
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/notebooks"), json!({ "analysis.ipynb": NOTEBOOK }))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/notebooks").as_ref()], cx).await;
+        project.read_with(cx, |project, _| {
+            project
+                .languages()
+                .register_test_language(language::LanguageConfig {
+                    name: "Python".into(),
+                    matcher: language::LanguageMatcher {
+                        path_suffixes: vec!["py".into()],
+                        ..Default::default()
+                    }
+                    .into(),
+                    line_comments: vec!["# ".into()],
+                    ..Default::default()
+                });
+        });
+        cx.update(|cx| ReplStore::init(fs.clone(), cx));
+
+        let project_path = project.read_with(cx, |project, cx| ProjectPath {
+            worktree_id: project.worktrees(cx).next().unwrap().read(cx).id(),
+            path: rel_path("analysis.ipynb").into(),
+        });
+        let notebook_item = cx
+            .update(|cx| {
+                NotebookItem::try_open(&project, &project_path, cx)
+                    .expect("ipynb files should be openable as notebooks")
+            })
+            .await
+            .expect("notebook should parse");
+
+        let cx = cx.add_empty_window();
+        let notebook_editor = cx.update(|window, cx| {
+            cx.new(|cx| NotebookEditor::new(project.clone(), notebook_item, window, cx))
+        });
+        cx.run_until_parked();
+
+        let sidecar = std::path::PathBuf::from(path!("/notebooks/.analysis.ipynb.py"));
+        let written = fs
+            .load(&sidecar)
+            .await
+            .expect("the sidecar file should exist while the notebook is open");
+        assert_eq!(written, "# %%\nvalue = 1");
+
+        let cell = code_cell_at(&notebook_editor, 0, cx);
+        cx.read(|cx| {
+            let document = cell.read(cx).document().read(cx);
+            assert!(
+                document.file().is_some(),
+                "cells should be backed by the file"
+            );
+            assert_eq!(cell.read(cx).current_source(cx), "value = 1");
+        });
+
+        drop(cell);
+        cx.update(|_, _| drop(notebook_editor));
+        cx.run_until_parked();
+        assert!(
+            !fs.is_file(&sidecar).await,
+            "closing the notebook should delete the sidecar file"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_source_view_edits_come_back_as_cells(cx: &mut TestAppContext) {
+        let (notebook_editor, cx, _fs) =
+            open_notebook_editor(NOTEBOOK_WITH_TWO_CODE_CELLS, cx).await;
+
+        notebook_editor.update_in(cx, |notebook_editor, window, cx| {
+            notebook_editor.toggle_source_view(&ToggleSourceView, window, cx);
+        });
+        let source_editor = notebook_editor.read_with(cx, |notebook_editor, _| {
+            notebook_editor
+                .source_view
+                .as_ref()
+                .expect("the source view should be open")
+                .editor
+                .clone()
+        });
+        cx.read(|cx| {
+            assert_eq!(
+                source_editor.read(cx).text(cx),
+                "# %%\nimport math\n\n# %% [markdown]\n# Some notes\n\n# %%\nmath.pi"
+            );
+        });
+
+        source_editor.update_in(cx, |source_editor, window, cx| {
+            source_editor.set_text(
+                "# %%\nimport math\n\n# %% [markdown]\n# Some notes\n\n# %%\nmath.tau\n\n# %%\nprint(1)",
+                window,
+                cx,
+            );
+        });
+        assert!(notebook_editor.read_with(cx, |notebook_editor, cx| notebook_editor.is_dirty(cx)));
+
+        notebook_editor.update_in(cx, |notebook_editor, window, cx| {
+            notebook_editor.toggle_source_view(&ToggleSourceView, window, cx);
+        });
+        notebook_editor.read_with(cx, |notebook_editor, cx| {
+            assert!(notebook_editor.source_view.is_none());
+            let ids: Vec<_> = notebook_editor
+                .cell_order
+                .iter()
+                .map(|cell_id| cell_id.to_string())
+                .collect();
+            assert_eq!(ids.len(), 4);
+            assert_eq!(&ids[..3], ["first", "notes", "second"]);
+        });
+        let edited = code_cell_at(&notebook_editor, 2, cx);
+        let added = code_cell_at(&notebook_editor, 3, cx);
+        cx.read(|cx| {
+            assert_eq!(edited.read(cx).current_source(cx), "math.tau");
+            assert_eq!(added.read(cx).current_source(cx), "print(1)");
+            assert_eq!(
+                edited.read(cx).document().read(cx).text(),
+                "# %%\nimport math\n# %%\nmath.tau\n# %%\nprint(1)"
+            );
+        });
+    }
+
+    #[test]
+    fn test_align_cells_keeps_unchanged_and_edited_cells() {
+        let code = |source: &str| ScriptCell {
+            kind: ScriptCellKind::Code,
+            source: source.to_string(),
+        };
+        let markdown = |source: &str| ScriptCell {
+            kind: ScriptCellKind::Markdown,
+            source: source.to_string(),
+        };
+        let old = vec![code("a"), markdown("notes"), code("b"), code("c")];
+        let new = vec![code("new"), code("a"), markdown("notes"), code("b edited")];
+        assert_eq!(
+            align_cells(&old, &new),
+            vec![None, Some(0), Some(1), Some(2)]
+        );
+
+        let reordered = vec![code("c"), code("a")];
+        assert_eq!(align_cells(&old, &reordered), vec![Some(3), Some(0)]);
+    }
+
+    #[gpui::test]
+    async fn test_code_cells_diff_against_the_committed_notebook(cx: &mut TestAppContext) {
+        // The same notebook after re-running the first cell and editing the
+        // second one.
+        let working_copy = NOTEBOOK_WITH_TWO_CODE_CELLS
+            .replace(
+                "   \"execution_count\": null,\n   \"id\": \"first\",\n   \"metadata\": {},\n   \"outputs\": [],",
+                "   \"execution_count\": 7,\n   \"id\": \"first\",\n   \"metadata\": {},\n   \"outputs\": [\n    {\n     \"name\": \"stdout\",\n     \"output_type\": \"stream\",\n     \"text\": [\n      \"done\\n\"\n     ]\n    }\n   ],",
+            )
+            .replace("\"math.pi\"", "\"math.tau\"");
+        assert_ne!(working_copy, NOTEBOOK_WITH_TWO_CODE_CELLS);
+
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/notebooks"),
+            json!({ ".git": {}, "test.ipynb": working_copy }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            std::path::Path::new(path!("/notebooks/.git")),
+            &[("test.ipynb", NOTEBOOK_WITH_TWO_CODE_CELLS.to_string())],
+        );
+        let project = Project::test(fs.clone(), [path!("/notebooks").as_ref()], cx).await;
+        cx.update(|cx| ReplStore::init(fs.clone(), cx));
+        cx.run_until_parked();
+
+        let project_path = project.read_with(cx, |project, cx| ProjectPath {
+            worktree_id: project.worktrees(cx).next().unwrap().read(cx).id(),
+            path: rel_path("test.ipynb").into(),
+        });
+        let notebook_item = cx
+            .update(|cx| {
+                NotebookItem::try_open(&project, &project_path, cx)
+                    .expect("ipynb files should be openable as notebooks")
+            })
+            .await
+            .expect("notebook should parse");
+        let cx = cx.add_empty_window();
+        let notebook_editor = cx.update(|window, cx| {
+            cx.new(|cx| NotebookEditor::new(project.clone(), notebook_item, window, cx))
+        });
+        cx.run_until_parked();
+
+        let changed_rows = |notebook_editor: &Entity<NotebookEditor>,
+                            cx: &mut gpui::VisualTestContext| {
+            notebook_editor.read_with(cx, |notebook_editor, cx| {
+                let diff = notebook_editor
+                    .code_diff
+                    .as_ref()
+                    .expect("a notebook in a repository should have a diff");
+                let document = notebook_editor.code_document.read(cx).text_snapshot();
+                diff.read(cx)
+                    .snapshot(cx)
+                    .hunks(&document)
+                    .map(|hunk| {
+                        use language::ToPoint as _;
+                        hunk.buffer_range.start.to_point(&document).row
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        // Row 3 holds the second code cell; the first cell's new outputs and
+        // execution count are not part of the comparison.
+        assert_eq!(changed_rows(&notebook_editor, cx), vec![3]);
+
+        let first = code_cell_at(&notebook_editor, 0, cx);
+        first.update(cx, |cell, cx| cell.set_source("import math, os", cx));
+        cx.run_until_parked();
+        assert_eq!(changed_rows(&notebook_editor, cx), vec![1, 3]);
     }
 }

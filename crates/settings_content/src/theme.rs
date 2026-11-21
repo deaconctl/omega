@@ -762,6 +762,30 @@ pub struct ThemeColorsContent {
     #[serde(rename = "tab.active_background")]
     pub tab_active_background: Option<ThemeColor>,
 
+    #[serde(rename = "tab.git_added_background")]
+    pub tab_git_added_background: Option<ThemeColor>,
+
+    #[serde(rename = "tab.git_modified_background")]
+    pub tab_git_modified_background: Option<ThemeColor>,
+
+    #[serde(rename = "tab.git_deleted_background")]
+    pub tab_git_deleted_background: Option<ThemeColor>,
+
+    #[serde(rename = "tab.git_conflict_background")]
+    pub tab_git_conflict_background: Option<ThemeColor>,
+
+    #[serde(rename = "panel.git_added_background")]
+    pub panel_git_added_background: Option<ThemeColor>,
+
+    #[serde(rename = "panel.git_modified_background")]
+    pub panel_git_modified_background: Option<ThemeColor>,
+
+    #[serde(rename = "panel.git_deleted_background")]
+    pub panel_git_deleted_background: Option<ThemeColor>,
+
+    #[serde(rename = "panel.git_conflict_background")]
+    pub panel_git_conflict_background: Option<ThemeColor>,
+
     #[serde(rename = "search.match_background")]
     pub search_match_background: Option<ThemeColor>,
 

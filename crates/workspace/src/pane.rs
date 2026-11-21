@@ -21,9 +21,9 @@ use git::{CopyFilePermalink, OpenFilePermalink};
 use gpui::{
     Action, Anchor, AnyElement, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Div,
     DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent,
-    Focusable, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel, Render,
-    ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window, actions,
-    anchored, deferred, prelude::*,
+    Focusable, Hsla, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel,
+    Render, ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window,
+    actions, anchored, deferred, prelude::*,
 };
 use itertools::Itertools;
 use language::{Capability, DiagnosticSeverity};
@@ -2823,10 +2823,41 @@ impl Pane {
         self.activate_item(index, true, true, window, cx);
     }
 
+    /// The background tint for an item's tab that reflects its file's git status,
+    /// when `tabs.git_status` is enabled.
+    fn git_status_tab_tint(&self, item: &dyn ItemHandle, cx: &App) -> Option<Hsla> {
+        if !ItemSettings::get_global(cx).git_status {
+            return None;
+        }
+        let project_path = item.project_path(cx)?;
+        let project = self.project.upgrade()?;
+        let status = project
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .project_path_git_status(&project_path, cx)?
+            .summary();
+        let colors = cx.theme().colors();
+        let tracked = status.index + status.worktree;
+        let tint = if status.conflict > 0 {
+            colors.tab_git_conflict_background
+        } else if tracked.deleted > 0 {
+            colors.tab_git_deleted_background
+        } else if tracked.modified > 0 {
+            colors.tab_git_modified_background
+        } else if tracked.added > 0 || status.untracked > 0 {
+            colors.tab_git_added_background
+        } else {
+            return None;
+        };
+        Some(tint)
+    }
+
     fn tab_icon_element(
         &self,
         item: &dyn ItemHandle,
         is_active: bool,
+        tint: Option<Hsla>,
         window: &Window,
         cx: &App,
     ) -> Option<AnyElement> {
@@ -2843,11 +2874,12 @@ impl Pane {
             return Some(icon.into_any_element());
         };
 
-        let knockout_item_color = if is_active {
+        let tab_background = if is_active {
             cx.theme().colors().tab_active_background
         } else {
             cx.theme().colors().tab_bar_background
         };
+        let knockout_item_color = tint.map_or(tab_background, |tint| tab_background.blend(tint));
 
         let (icon_decoration, icon_color) = if matches!(diagnostic, &DiagnosticSeverity::ERROR) {
             (IconDecorationKind::X, Color::Error)
@@ -2899,7 +2931,8 @@ impl Pane {
             cx,
         );
 
-        let icon = self.tab_icon_element(item, is_active, window, cx);
+        let git_status_tint = self.git_status_tab_tint(item, cx);
+        let icon = self.tab_icon_element(item, is_active, git_status_tint, window, cx);
 
         let settings = ItemSettings::get_global(cx);
         let close_side = &settings.close_position;
@@ -2955,6 +2988,7 @@ impl Pane {
                 ClosePosition::Right => ui::TabCloseSide::End,
             })
             .toggle_state(is_active)
+            .tint(git_status_tint)
             .on_click(cx.listener({
                 let item_handle = item.boxed_clone();
                 move |pane: &mut Self, event: &ClickEvent, window, cx| {
@@ -5132,10 +5166,13 @@ impl Render for DraggedTab {
             window,
             cx,
         );
-        let icon =
-            self.pane
-                .read(cx)
-                .tab_icon_element(self.item.as_ref(), self.is_active, window, cx);
+        let icon = self.pane.read(cx).tab_icon_element(
+            self.item.as_ref(),
+            self.is_active,
+            None,
+            window,
+            cx,
+        );
         Tab::new("")
             .toggle_state(self.is_active)
             .children(icon)

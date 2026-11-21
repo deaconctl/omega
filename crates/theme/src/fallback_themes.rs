@@ -3,9 +3,10 @@ use std::sync::Arc;
 use gpui::{FontStyle, FontWeight, HighlightStyle, Hsla, WindowBackgroundAppearance, hsla};
 
 use crate::{
-    AccentColors, Appearance, DEFAULT_DARK_THEME, PlayerColors, StatusColors,
-    StatusColorsRefinement, SyntaxTheme, SystemColors, Theme, ThemeColors, ThemeColorsRefinement,
-    ThemeFamily, ThemeStyles, default_color_scales,
+    AccentColors, Appearance, DEFAULT_DARK_THEME, GIT_PANEL_BACKGROUND_OPACITY,
+    GIT_TAB_BACKGROUND_OPACITY, PlayerColors, StatusColors, StatusColorsRefinement, SyntaxTheme,
+    SystemColors, Theme, ThemeColors, ThemeColorsRefinement, ThemeFamily, ThemeStyles,
+    default_color_scales,
 };
 
 /// The default theme family for Zed.
@@ -155,6 +156,20 @@ pub(crate) fn zed_default_dark() -> Theme {
                 tab_bar_background: bg,
                 tab_inactive_background: bg,
                 tab_active_background: editor,
+                tab_git_added_background: ADDED_COLOR.opacity(GIT_TAB_BACKGROUND_OPACITY),
+                tab_git_modified_background: MODIFIED_COLOR.opacity(GIT_TAB_BACKGROUND_OPACITY),
+                tab_git_deleted_background: REMOVED_COLOR.opacity(GIT_TAB_BACKGROUND_OPACITY),
+                tab_git_conflict_background: crate::orange()
+                    .light()
+                    .step_12()
+                    .opacity(GIT_TAB_BACKGROUND_OPACITY),
+                panel_git_added_background: ADDED_COLOR.opacity(GIT_PANEL_BACKGROUND_OPACITY),
+                panel_git_modified_background: MODIFIED_COLOR.opacity(GIT_PANEL_BACKGROUND_OPACITY),
+                panel_git_deleted_background: REMOVED_COLOR.opacity(GIT_PANEL_BACKGROUND_OPACITY),
+                panel_git_conflict_background: crate::orange()
+                    .light()
+                    .step_12()
+                    .opacity(GIT_PANEL_BACKGROUND_OPACITY),
                 search_match_background: bg,
                 search_active_match_background: bg,
 

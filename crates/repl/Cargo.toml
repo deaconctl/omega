@@ -21,12 +21,14 @@ async-dispatcher.workspace = true
 async-task.workspace = true
 async-tungstenite = { workspace = true, features = ["tokio", "tokio-rustls-manual-roots", "tokio-runtime"] }
 base64.workspace = true
+buffer_diff.workspace = true
 client.workspace = true
 collections.workspace = true
 command_palette_hooks.workspace = true
 editor.workspace = true
 feature_flags.workspace = true
 file_icons.workspace = true
+fs.workspace = true
 futures.workspace = true
 gpui.workspace = true
 html_to_markdown.workspace = true

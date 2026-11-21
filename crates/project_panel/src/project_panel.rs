@@ -659,6 +659,23 @@ struct ItemColors {
     focused: Hsla,
 }
 
+/// The background tint for a project panel entry that reflects its git status.
+fn git_status_row_tint(git_status: GitSummary, cx: &App) -> Option<Hsla> {
+    let colors = cx.theme().colors();
+    let tracked = git_status.index + git_status.worktree;
+    if git_status.conflict > 0 {
+        Some(colors.panel_git_conflict_background)
+    } else if tracked.deleted > 0 {
+        Some(colors.panel_git_deleted_background)
+    } else if tracked.modified > 0 {
+        Some(colors.panel_git_modified_background)
+    } else if tracked.added > 0 || git_status.untracked > 0 {
+        Some(colors.panel_git_added_background)
+    } else {
+        None
+    }
+}
+
 fn get_item_color(is_sticky: bool, cx: &App) -> ItemColors {
     let colors = cx.theme().colors();
 
@@ -6167,6 +6184,8 @@ impl ProjectPanel {
 
         let bg_color = if is_marked {
             item_colors.marked
+        } else if let Some(tint) = git_status_row_tint(details.git_status, cx) {
+            item_colors.default.blend(tint)
         } else {
             item_colors.default
         };
