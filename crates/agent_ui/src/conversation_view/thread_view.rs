@@ -5716,7 +5716,7 @@ impl ThreadView {
                                     .gap_0p5()
                                     .child(self.render_add_context_button(cx))
                                     .child(self.render_follow_toggle(cx))
-                                    .children(self.render_plan_usage(cx))
+                                    .child(self.render_plan_usage(cx))
                                     .map(|this| match &self.config_options_view {
                                         Some(config_view) => this
                                             .children(config_view.read(cx).response_controls(cx)),
@@ -6014,16 +6014,25 @@ impl ThreadView {
             .is_some_and(|model| model.supports_split_token_display())
     }
 
-    fn render_plan_usage(&self, cx: &App) -> Option<AnyElement> {
-        let plan_usage = self.thread.read(cx).plan_usage()?;
+    fn render_plan_usage(&self, cx: &App) -> AnyElement {
+        let plan_usage = self.thread.read(cx).plan_usage();
         let now = chrono::Utc::now();
-        let constrained = plan_usage.most_constrained_window(now)?;
-        let utilization = constrained.utilization?;
+        // The ring stays in place before the agent reports any usage, and after
+        // every window it reported has reset, so the composer doesn't shift.
+        let constrained = plan_usage
+            .and_then(|plan_usage| plan_usage.most_constrained_window(now))
+            .and_then(|window| Some((window.status, window.utilization?)));
 
-        let ring_color = plan_usage_color(constrained.status, utilization).color(cx);
+        let (utilization, ring_color) = match constrained {
+            Some((status, utilization)) => {
+                (utilization, plan_usage_color(status, utilization).color(cx))
+            }
+            None => (0., Color::Muted.color(cx)),
+        };
 
         let rows = plan_usage
-            .current_windows(now)
+            .into_iter()
+            .flat_map(|plan_usage| plan_usage.current_windows(now))
             .map(|window| {
                 let mut detail = match (window.status, window.utilization) {
                     (Some(acp_thread::PlanUsageStatus::Rejected), _) => "Limit reached".to_string(),
@@ -6045,38 +6054,39 @@ impl ThreadView {
             })
             .collect::<Vec<_>>();
 
-        Some(
-            h_flex()
-                .id("plan_usage")
-                .flex_shrink_0()
-                .mt_px()
-                .mx_1()
-                .child(
-                    // The ring is capped at full: past the limit the color
-                    // already tells the window is exhausted.
-                    CircularProgress::new(utilization.clamp(0., 1.), 1., px(16.), cx)
-                        .stroke_width(px(2.))
-                        .progress_color(ring_color),
-                )
-                .tooltip(Tooltip::element(move |_window, _cx| {
-                    v_flex()
-                        .gap_0p5()
-                        .child(
-                            Label::new("Plan Usage")
-                                .color(Color::Muted)
-                                .size(LabelSize::Small),
-                        )
-                        .children(rows.iter().map(|(label, detail, color)| {
-                            h_flex()
-                                .gap_4()
-                                .justify_between()
-                                .child(Label::new(label.clone()))
-                                .child(Label::new(detail.clone()).color(*color))
-                        }))
-                        .into_any_element()
-                }))
-                .into_any_element(),
-        )
+        h_flex()
+            .id("plan_usage")
+            .flex_shrink_0()
+            .mt_px()
+            .mx_1()
+            .child(
+                // The ring is capped at full: past the limit the color
+                // already tells the window is exhausted.
+                CircularProgress::new(utilization.clamp(0., 1.), 1., px(16.), cx)
+                    .stroke_width(px(2.))
+                    .progress_color(ring_color),
+            )
+            .tooltip(Tooltip::element(move |_window, _cx| {
+                v_flex()
+                    .gap_0p5()
+                    .child(
+                        Label::new("Plan Usage")
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
+                    )
+                    .children(rows.iter().map(|(label, detail, color)| {
+                        h_flex()
+                            .gap_4()
+                            .justify_between()
+                            .child(Label::new(label.clone()))
+                            .child(Label::new(detail.clone()).color(*color))
+                    }))
+                    .when(rows.is_empty(), |this| {
+                        this.child(Label::new("No usage reported yet"))
+                    })
+                    .into_any_element()
+            }))
+            .into_any_element()
     }
 
     fn render_token_usage(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {

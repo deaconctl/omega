@@ -10618,6 +10618,25 @@ impl Render for Workspace {
                                     .inset_0()
                                     .shadow_lg();
 
+                                // The overlay is positioned against the workspace's padding
+                                // box, so in the floating layout it has to step in by the gap
+                                // itself to sit where the cards do.
+                                if let Some(floating) = FloatingLayout::get(cx) {
+                                    return Some(
+                                        floating
+                                            .style_card(
+                                                overlay
+                                                    .top(floating.gap)
+                                                    .bottom(floating.gap)
+                                                    .left(floating.gap)
+                                                    .right(floating.gap),
+                                                cx,
+                                            )
+                                            .child(floating.corner_mask(cx))
+                                            .child(floating.outline(cx)),
+                                    );
+                                }
+
                                 if !WorkspaceSettings::get_global(cx).zoomed_padding {
                                     return Some(overlay);
                                 }
