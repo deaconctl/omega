@@ -6151,6 +6151,9 @@ impl EditorElement {
             return;
         };
         let any_scrollbar_dragged = self.editor.read(cx).scroll_manager.any_scrollbar_dragged();
+        // The floating layout rounds every card, so square thumbs would be the only
+        // sharp corners left on screen.
+        let rounded_thumbs = workspace::FloatingLayout::get(cx).is_some();
 
         for (scrollbar_layout, axis) in scrollbars_layout.iter_scrollbars() {
             let hitbox = &scrollbar_layout.hitbox;
@@ -6207,11 +6210,22 @@ impl EditorElement {
                                 cx.theme().colors().scrollbar_thumb_background
                             }
                         };
+                        let thumb_corners = if rounded_thumbs {
+                            Corners::all(Pixels::MAX).clamp_radii_for_quad_size(thumb_bounds.size)
+                        } else {
+                            Corners::default()
+                        };
                         window.paint_quad(quad(
                             thumb_bounds,
-                            Corners::default(),
+                            thumb_corners,
                             scrollbar_thumb_color,
-                            scrollbar_edges,
+                            // A border on a rounded thumb would draw a stray arc
+                            // along one side only.
+                            if rounded_thumbs {
+                                Edges::default()
+                            } else {
+                                scrollbar_edges
+                            },
                             cx.theme().colors().scrollbar_thumb_border,
                             BorderStyle::Solid,
                         ));
