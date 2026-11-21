@@ -5978,7 +5978,7 @@ impl AgentPanel {
         })
     }
 
-    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let agent_server_store = self.project.read(cx).agent_server_store().clone();
 
         let focus_handle = self.focus_handle(cx);
@@ -6342,15 +6342,37 @@ impl AgentPanel {
                 .into_any_element()
         };
 
-        h_flex()
+        // Matches the composer: the floating layout rounds every card, so the
+        // header is drawn as a rounded box of its own instead of a band.
+        let rounded_header = workspace::FloatingLayout::get(cx).is_some();
+
+        let toolbar = h_flex()
             .id("agent-panel-toolbar")
             .h(Tab::container_height(cx))
             .flex_shrink_0()
             .max_w_full()
             .bg(cx.theme().colors().tab_bar_background)
-            .border_b_1()
             .border_color(cx.theme().colors().border)
-            .child(toolbar_content)
+            .map(|this| {
+                if rounded_header {
+                    this.w_full().rounded_lg().border_1()
+                } else {
+                    this.border_b_1()
+                }
+            })
+            .child(toolbar_content);
+
+        if rounded_header {
+            h_flex()
+                .flex_shrink_0()
+                .max_w_full()
+                .px_2()
+                .pt_2()
+                .child(toolbar)
+                .into_any_element()
+        } else {
+            toolbar.into_any_element()
+        }
     }
 
     fn should_render_trial_end_upsell(&self, cx: &mut Context<Self>) -> bool {
