@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+help_info() {
+    echo "
+Usage: ${0##*/} [options]
+Pull the current branch, build Omega on the stable channel and install it.
+
+  Linux: ~/.local/omega.app, ~/.local/bin/omega and a dev.omega.Omega desktop entry.
+  macOS: /Applications/Omega.app (ad-hoc signed) and ~/.local/bin/omega.
+
+Options:
+  --no-pull   Build the checkout as it is, without running git pull first.
+  -h, --help  Display this help and exit.
+"
+}
+
+pull=true
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --no-pull)
+            pull=false
+            shift
+            ;;
+        -h|--help)
+            help_info
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            help_info
+            exit 1
+            ;;
+    esac
+done
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_dir"
+
+if "$pull"; then
+    git pull --ff-only
+fi
+
+export ZED_RELEASE_CHANNEL=stable
+# Compiled into the binary: "Check for Updates" shows this instead of contacting
+# Zed's update server, which only knows about upstream releases.
+export ZED_UPDATE_EXPLANATION="Omega is built from source. Run script/omega-update in ${repo_dir} to update it."
+
+bin_dir="$HOME/.local/bin"
+mkdir -p "$bin_dir"
+
+install_linux() {
+    local arch archive temp_dir app_dir desktop_dir desktop_file missing
+    arch="$(uname -m)"
+
+    # The remote server is not installed by this script, so build it against the
+    # host target instead of musl, which would need musl-gcc.
+    if [[ -z "${REMOTE_SERVER_TARGET:-}" ]]; then
+        local host_line
+        host_line="$(rustc --version --verbose | grep host)"
+        export REMOTE_SERVER_TARGET="${host_line#*: }"
+    fi
+
+    script/bundle-linux --skip-sentry
+
+    archive="${CARGO_TARGET_DIR:-target}/release/zed-linux-${arch}.tar.gz"
+    temp_dir="$(mktemp -d)"
+    trap 'rm -rf "$temp_dir"; trap - RETURN' RETURN
+    tar -xzf "$archive" -C "$temp_dir"
+
+    app_dir="$HOME/.local/omega.app"
+    rm -rf "$app_dir"
+    mv "$temp_dir/zed.app" "$app_dir"
+
+    if command -v ldd >/dev/null 2>&1; then
+        missing="$(ldd "$app_dir/libexec/zed-editor" 2>/dev/null | sed -n 's/^[[:space:]]*\(.*\) => not found$/\1/p')"
+        if [[ -n "$missing" ]]; then
+            echo "Warning: your system is missing libraries that Omega needs:" >&2
+            echo "$missing" >&2
+        fi
+    fi
+
+    ln -sf "$app_dir/bin/zed" "$bin_dir/omega"
+
+    desktop_dir="$HOME/.local/share/applications"
+    desktop_file="$desktop_dir/dev.omega.Omega.desktop"
+    mkdir -p "$desktop_dir"
+    # The file name has to match the Wayland app id (ReleaseChannel::app_id) for
+    # the compositor to pick up the name and icon. zed:// links are left to Zed.
+    APP_NAME="Omega" \
+    APP_CLI="$app_dir/bin/zed" \
+    APP_ICON="$app_dir/share/icons/hicolor/512x512/apps/zed.png" \
+    APP_ARGS="%U" \
+    DO_STARTUP_NOTIFY="true" \
+        envsubst < crates/zed/resources/zed.desktop.in |
+        sed 's|x-scheme-handler/zed;||' > "$desktop_file"
+    chmod +x "$desktop_file"
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$desktop_dir" || echo "Warning: update-desktop-database failed" >&2
+    fi
+
+    echo "Omega installed in $app_dir"
+}
+
+install_mac() {
+    script/bundle-mac -i
+    ln -sf "/Applications/Omega.app/Contents/MacOS/cli" "$bin_dir/omega"
+    echo "Omega installed in /Applications/Omega.app"
+}
+
+case "$(uname -s)" in
+    Linux) install_linux ;;
+    Darwin) install_mac ;;
+    *)
+        echo "Unsupported platform: $(uname -s)" >&2
+        exit 1
+        ;;
+esac
+
+if [[ "$(command -v omega || true)" != "$bin_dir/omega" ]]; then
+    echo "Add $bin_dir to your PATH to run Omega with 'omega'."
+fi
