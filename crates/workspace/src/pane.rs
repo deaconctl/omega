@@ -1,7 +1,7 @@
 use crate::{
-    CloseWindow, NewCenterTerminal, NewFile, NewTerminal, OpenInTerminal, OpenOptions,
-    OpenTerminal, OpenVisible, SplitDirection, ToggleFileFinder, ToggleProjectSymbols, ToggleZoom,
-    Workspace, WorkspaceItemBuilder, ZoomIn, ZoomOut,
+    CloseWindow, FloatingLayout, NewCenterTerminal, NewFile, NewTerminal, OpenInTerminal,
+    OpenOptions, OpenTerminal, OpenVisible, SplitDirection, ToggleFileFinder, ToggleProjectSymbols,
+    ToggleZoom, Workspace, WorkspaceItemBuilder, ZoomIn, ZoomOut,
     focus_follows_mouse::FocusFollowsMouse as _,
     invalid_item_view::InvalidItemView,
     item::{
@@ -2987,6 +2987,7 @@ impl Pane {
                 ClosePosition::Left => ui::TabCloseSide::Start,
                 ClosePosition::Right => ui::TabCloseSide::End,
             })
+            .card_radius(FloatingLayout::get(cx).map(|floating| floating.radius))
             .toggle_state(is_active)
             .tint(git_status_tint)
             .on_click(cx.listener({
@@ -3679,9 +3680,10 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Pane>,
     ) -> AnyElement {
+        let card_gap = FloatingLayout::get(cx).map(|floating| floating.gap);
         let tab_bar = self
             .configure_tab_bar_start(
-                TabBar::new("tab_bar"),
+                TabBar::new("tab_bar").card_gap(card_gap),
                 navigate_backward,
                 navigate_forward,
                 window,
@@ -3696,6 +3698,7 @@ impl Pane {
                 let is_scrollable = max_scroll > px(2.0);
                 let has_active_unpinned_tab = self.active_item_index >= self.pinned_tab_count;
                 h_flex()
+                    .when_some(card_gap, |this, gap| this.gap(gap))
                     .children(pinned_tabs)
                     .when(is_scrollable && is_scrolled, |this| {
                         this.when(has_active_unpinned_tab, |this| this.border_r_2())
@@ -3717,9 +3720,10 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Pane>,
     ) -> AnyElement {
+        let card_gap = FloatingLayout::get(cx).map(|floating| floating.gap);
         let pinned_tab_bar = self
             .configure_tab_bar_start(
-                TabBar::new("pinned_tab_bar"),
+                TabBar::new("pinned_tab_bar").card_gap(card_gap),
                 navigate_backward,
                 navigate_forward,
                 window,
@@ -3731,6 +3735,7 @@ impl Pane {
                     .debug_selector(|| "pinned_tabs_row".into())
                     .overflow_x_scroll()
                     .w_full()
+                    .when_some(card_gap, |this, gap| this.gap(gap))
                     .children(pinned_tabs)
                     .child(self.render_pinned_tab_bar_drop_target(cx)),
             );
@@ -3739,11 +3744,9 @@ impl Pane {
             .flex_none()
             .child(pinned_tab_bar)
             .child(
-                TabBar::new("unpinned_tab_bar").child(self.render_unpinned_tabs_container(
-                    unpinned_tabs,
-                    tab_count,
-                    cx,
-                )),
+                TabBar::new("unpinned_tab_bar")
+                    .card_gap(card_gap)
+                    .child(self.render_unpinned_tabs_container(unpinned_tabs, tab_count, cx)),
             )
             .into_any_element()
     }
@@ -3758,6 +3761,9 @@ impl Pane {
             .id("unpinned tabs")
             .overflow_x_scroll()
             .w_full()
+            .when_some(FloatingLayout::get(cx), |this, floating| {
+                this.gap(floating.gap)
+            })
             .track_scroll(&self.tab_bar_scroll_handle)
             .on_scroll(cx.listener(|this, _, _, _| {
                 this.suppress_scroll = true;

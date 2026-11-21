@@ -1,7 +1,7 @@
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
 use crate::persistence::model::DockData;
 use crate::status_bar::HideStatusItem;
-use crate::{DraggedDock, Event, ModalLayer, Pane, WorkspaceSettings};
+use crate::{DraggedDock, Event, FloatingLayout, ModalLayer, Pane, WorkspaceSettings};
 use crate::{Workspace, status_bar::StatusItemView};
 use anyhow::Context as _;
 use client::proto;
@@ -1337,12 +1337,15 @@ impl Render for Dock {
                 }
             };
 
+            let floating = FloatingLayout::get(cx);
+
             div()
                 .id("dock-panel")
                 .key_context(dispatch_context)
                 .track_focus(&self.focus_handle(cx))
                 .focus_follows_mouse(WorkspaceSettings::get_global(cx).focus_follows_mouse, cx)
                 .flex()
+                .relative()
                 .bg(cx.theme().colors().panel_background)
                 .border_color(cx.theme().colors().border)
                 .overflow_hidden()
@@ -1352,10 +1355,16 @@ impl Render for Dock {
                     Axis::Horizontal => this.w_full().h_full().flex_row(),
                     Axis::Vertical => this.h_full().w_full().flex_col(),
                 })
-                .map(|this| match self.position() {
-                    DockPosition::Left => this.border_r_1(),
-                    DockPosition::Right => this.border_l_1(),
-                    DockPosition::Bottom => this.border_t_1(),
+                .map(|this| match floating {
+                    Some(floating) => floating.style_card(this, cx),
+                    // The gap of the floating layout already separates the dock
+                    // from its neighbour; the hairline is only needed when the
+                    // dock is flush against the editor area.
+                    None => match self.position() {
+                        DockPosition::Left => this.border_r_1(),
+                        DockPosition::Right => this.border_l_1(),
+                        DockPosition::Bottom => this.border_t_1(),
+                    },
                 })
                 .child(
                     div()
@@ -1370,6 +1379,10 @@ impl Render for Dock {
                                 .cached(StyleRefinement::default().v_flex().size_full()),
                         ),
                 )
+                .when_some(floating, |this, floating| {
+                    this.child(floating.corner_mask(cx))
+                        .child(floating.outline(cx))
+                })
                 .when(self.resizable(cx), |this| {
                     this.child(create_resize_handle())
                 })

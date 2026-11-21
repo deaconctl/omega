@@ -1055,6 +1055,9 @@ impl VsCodeSettings {
             accessible_mode: None,
             text_rendering_mode: None,
             use_display_p3: None,
+            ui_layout: None,
+            ui_card_gap: None,
+            ui_card_radius: None,
             autosave: self.read_enum("files.autoSave", |s| match s {
                 "off" => Some(AutosaveSetting::Off),
                 "afterDelay" => Some(AutosaveSetting::AfterDelay {
