@@ -15,6 +15,8 @@ pub struct FloatingLayout {
     pub gap: Pixels,
     /// The corner radius of every card.
     pub radius: Pixels,
+    /// The space between a dock card's edge and its content.
+    pub padding: Pixels,
 }
 
 impl FloatingLayout {
@@ -24,10 +26,17 @@ impl FloatingLayout {
         let settings = WorkspaceSettings::get_global(cx);
         match settings.ui_layout {
             settings::UiLayout::Classic => None,
-            settings::UiLayout::Floating => Some(Self {
-                gap: px(settings.ui_card_gap.max(0.)),
-                radius: px(settings.ui_card_radius.max(0.)),
-            }),
+            settings::UiLayout::Floating => {
+                let radius = px(settings.ui_card_radius.max(0.));
+                Some(Self {
+                    gap: px(settings.ui_card_gap.max(0.)),
+                    radius,
+                    // The rounded corner cuts at most `(1 - 1/√2) * radius` into
+                    // the card along its diagonal, so half the radius keeps the
+                    // content clear of the corner mask with some room to spare.
+                    padding: radius / 2.,
+                })
+            }
         }
     }
 

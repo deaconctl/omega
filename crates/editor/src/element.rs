@@ -363,6 +363,45 @@ pub enum SplitSide {
     Right,
 }
 
+const SLIM_SCROLLBAR_THUMB_WIDTH: Pixels = px(6.);
+const SLIM_SCROLLBAR_THUMB_PADDING: Pixels = px(4.);
+const SLIM_SCROLLBAR_THUMB_OPACITY: f32 = 0.7;
+
+/// Shrinks an editor scrollbar thumb to the slim pill of `ui::Scrollbar`:
+/// centered across the track and kept clear of the track's ends.
+fn slim_scrollbar_thumb_bounds(
+    thumb_bounds: Bounds<Pixels>,
+    axis: ScrollbarAxis,
+) -> Bounds<Pixels> {
+    let (cross_size, main_size) = match axis {
+        ScrollbarAxis::Horizontal => (thumb_bounds.size.height, thumb_bounds.size.width),
+        ScrollbarAxis::Vertical => (thumb_bounds.size.width, thumb_bounds.size.height),
+    };
+    let cross_inset = (cross_size - SLIM_SCROLLBAR_THUMB_WIDTH.min(cross_size)) / 2.;
+    // Long enough thumbs keep the padding at both ends; short ones are left
+    // as they are so they don't collapse.
+    let main_inset = if main_size > SLIM_SCROLLBAR_THUMB_PADDING * 4. {
+        SLIM_SCROLLBAR_THUMB_PADDING
+    } else {
+        Pixels::ZERO
+    };
+
+    let (horizontal_inset, vertical_inset) = match axis {
+        ScrollbarAxis::Horizontal => (main_inset, cross_inset),
+        ScrollbarAxis::Vertical => (cross_inset, main_inset),
+    };
+    Bounds {
+        origin: point(
+            thumb_bounds.origin.x + horizontal_inset,
+            thumb_bounds.origin.y + vertical_inset,
+        ),
+        size: size(
+            thumb_bounds.size.width - horizontal_inset * 2.,
+            thumb_bounds.size.height - vertical_inset * 2.,
+        ),
+    }
+}
+
 impl EditorElement {
     pub(crate) const SCROLLBAR_WIDTH: Pixels = ui::EDITOR_SCROLLBAR_WIDTH;
 
@@ -6151,9 +6190,10 @@ impl EditorElement {
             return;
         };
         let any_scrollbar_dragged = self.editor.read(cx).scroll_manager.any_scrollbar_dragged();
-        // The floating layout rounds every card, so square thumbs would be the only
-        // sharp corners left on screen.
-        let rounded_thumbs = workspace::FloatingLayout::get(cx).is_some();
+        // The floating layout draws the editor's scrollbars like the regular ones of
+        // the rest of the UI (the agent thread, the panels): a slim pill floating
+        // over the content, without a track, instead of a wide square thumb.
+        let slim_scrollbars = workspace::FloatingLayout::get(cx).is_some();
 
         for (scrollbar_layout, axis) in scrollbars_layout.iter_scrollbars() {
             let hitbox = &scrollbar_layout.hitbox;
@@ -6174,14 +6214,16 @@ impl EditorElement {
                 };
 
                 window.paint_layer(|window| {
-                    window.paint_quad(quad(
-                        hitbox.bounds,
-                        Corners::default(),
-                        cx.theme().colors().scrollbar_track_background,
-                        scrollbar_edges,
-                        cx.theme().colors().scrollbar_track_border,
-                        BorderStyle::Solid,
-                    ));
+                    if !slim_scrollbars {
+                        window.paint_quad(quad(
+                            hitbox.bounds,
+                            Corners::default(),
+                            cx.theme().colors().scrollbar_track_background,
+                            scrollbar_edges,
+                            cx.theme().colors().scrollbar_track_border,
+                            BorderStyle::Solid,
+                        ));
+                    }
 
                     if axis == ScrollbarAxis::Vertical {
                         let fast_markers =
@@ -6210,25 +6252,36 @@ impl EditorElement {
                                 cx.theme().colors().scrollbar_thumb_background
                             }
                         };
-                        let thumb_corners = if rounded_thumbs {
-                            Corners::all(Pixels::MAX).clamp_radii_for_quad_size(thumb_bounds.size)
+                        if slim_scrollbars {
+                            let thumb_bounds = slim_scrollbar_thumb_bounds(thumb_bounds, axis);
+                            // Matches the thumb color of `ui::Scrollbar`, which
+                            // blends the thumb over a translucent surface unless
+                            // it is hovered.
+                            let blend_color = cx.theme().colors().surface_background;
+                            let blend_color =
+                                match scrollbar_layout.thumb_state {
+                                    ScrollbarThumbState::Idle => blend_color
+                                        .min(blend_color.alpha(SLIM_SCROLLBAR_THUMB_OPACITY)),
+                                    ScrollbarThumbState::Hovered
+                                    | ScrollbarThumbState::Dragging => blend_color,
+                                };
+                            window.paint_quad(
+                                fill(thumb_bounds, blend_color.blend(scrollbar_thumb_color))
+                                    .corner_radii(
+                                        Corners::all(Pixels::MAX)
+                                            .clamp_radii_for_quad_size(thumb_bounds.size),
+                                    ),
+                            );
                         } else {
-                            Corners::default()
-                        };
-                        window.paint_quad(quad(
-                            thumb_bounds,
-                            thumb_corners,
-                            scrollbar_thumb_color,
-                            // A border on a rounded thumb would draw a stray arc
-                            // along one side only.
-                            if rounded_thumbs {
-                                Edges::default()
-                            } else {
-                                scrollbar_edges
-                            },
-                            cx.theme().colors().scrollbar_thumb_border,
-                            BorderStyle::Solid,
-                        ));
+                            window.paint_quad(quad(
+                                thumb_bounds,
+                                Corners::default(),
+                                scrollbar_thumb_color,
+                                scrollbar_edges,
+                                cx.theme().colors().scrollbar_thumb_border,
+                                BorderStyle::Solid,
+                            ));
+                        }
 
                         if any_scrollbar_dragged {
                             window.set_window_cursor_style(CursorStyle::Arrow);

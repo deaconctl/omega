@@ -8,6 +8,7 @@ mod diff;
 pub mod elicitation;
 mod mention;
 pub mod notices;
+mod plan_usage;
 pub mod prompt_capabilities;
 pub mod subagents;
 mod submission;
@@ -35,6 +36,7 @@ use language::{
 };
 use markdown::{Markdown, MarkdownOptions};
 pub use mention::*;
+pub use plan_usage::*;
 use project::lsp_store::{FormatTrigger, LspFormatTarget};
 use project::{AgentLocation, Project};
 use serde::{Deserialize, Serialize};
@@ -3799,6 +3801,7 @@ pub struct AcpThread {
     reported_usage: Option<ReportedTokenUsage>,
     token_usage: Option<TokenUsage>,
     cost: Option<SessionCost>,
+    plan_usage: Option<PlanUsage>,
     prompt_capabilities: acp_v2::PromptCapabilities,
     available_commands: Vec<acp_v2::AvailableCommand>,
     _observe_prompt_capabilities: Task<anyhow::Result<()>>,
@@ -4147,6 +4150,7 @@ impl AcpThread {
             connection,
             token_usage: None,
             cost: None,
+            plan_usage: None,
             prompt_capabilities,
             available_commands: Vec::new(),
             _observe_prompt_capabilities: task,
@@ -5004,6 +5008,10 @@ impl AcpThread {
 
     pub fn cost(&self) -> Option<&SessionCost> {
         self.cost.as_ref()
+    }
+
+    pub fn plan_usage(&self) -> Option<&PlanUsage> {
+        self.plan_usage.as_ref()
     }
 
     pub fn has_pending_edit_tool_calls(&self) -> bool {
@@ -6310,6 +6318,13 @@ impl AcpThread {
                     currency: cost.currency.into(),
                     meta: cost.meta,
                 });
+            }
+        }
+        if let Some(meta) = update.meta.as_ref() {
+            let mut plan_usage = self.plan_usage.clone().unwrap_or_default();
+            if plan_usage.apply_usage_meta(meta) && self.plan_usage.as_ref() != Some(&plan_usage) {
+                self.plan_usage = Some(plan_usage);
+                cx.notify();
             }
         }
         cx.emit(AcpThreadEvent::TokenUsageUpdated(

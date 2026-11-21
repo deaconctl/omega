@@ -1342,7 +1342,9 @@ impl Render for Dock {
                     Axis::Vertical => this.h_full().w_full().flex_col(),
                 })
                 .map(|this| match floating {
-                    Some(floating) => floating.style_card(this, cx),
+                    // Only docks are padded: the editor area stays flush with its
+                    // card, as padding around code looked out of place.
+                    Some(floating) => floating.style_card(this, cx).p(floating.padding),
                     // The gap of the floating layout already separates the dock
                     // from its neighbour; the hairline is only needed when the
                     // dock is flush against the editor area.

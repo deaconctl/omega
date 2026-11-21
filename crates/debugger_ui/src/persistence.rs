@@ -317,10 +317,8 @@ pub(crate) fn deserialize_pane_layout(
                         );
                         Box::new(view)
                     }
-                    DebuggerPaneItem::Terminal => Box::new(SubView::new(
-                        terminal.focus_handle(cx),
-                        terminal.clone().into(),
-                        DebuggerPaneItem::Terminal,
+                    DebuggerPaneItem::Terminal => Box::new(SubView::terminal(
+                        terminal.clone(),
                         running_state.clone(),
                         pane_handle.clone(),
                         cx,

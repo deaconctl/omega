@@ -58,10 +58,11 @@ use time::{OffsetDateTime, UtcOffset, format_description::BorrowedFormatItem};
 use ui::{
     Chip, ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, ContextMenuEntry, DiffStat,
     Disclosure, Divider, HeaderResizeInfo, HighlightedLabel, IndentGuideColors, ListItem,
-    ListItemSpacing, RedistributableColumnsState, ScrollableHandle, Table, TableInteractionState,
-    TableRenderContext, TableResizeBehavior, Tooltip, WithScrollbar, bind_redistributable_columns,
-    prelude::*, redistribute_hidden_fractions, redistribute_hidden_widths,
-    render_redistributable_columns_resize_handles, render_table_header, table_row::TableRow,
+    ListItemSpacing, PopoverMenu, RedistributableColumnsState, ScrollableHandle, Table,
+    TableInteractionState, TableRenderContext, TableResizeBehavior, Tooltip, WithScrollbar,
+    bind_redistributable_columns, prelude::*, redistribute_hidden_fractions,
+    redistribute_hidden_widths, render_redistributable_columns_resize_handles, render_table_header,
+    table_row::TableRow,
 };
 use util::{ResultExt, debug_panic};
 use workspace::{
@@ -2532,8 +2533,92 @@ impl GitGraph {
                 .contains_key(&repo_id)
         {
             self.repo_id = repo_id;
+            // A branch or commit source names a ref of the previous repository,
+            // which the new one most likely doesn't have.
+            if matches!(self.log_source, LogSource::Branch(_) | LogSource::Sha(_)) {
+                self.log_source = LogSource::All;
+            }
+            self.selected_entry_idx = None;
+            self.hovered_entry_idx = None;
+            self.pending_select_sha = None;
+            self.selected_commit_diff = None;
+            self.selected_commit_diff_stats = None;
+            self._commit_diff_task = None;
+            self.selected_commit_message = None;
+            self._selected_commit_message_task = None;
+            self.changed_files_expanded_dirs.clear();
             self.invalidate_state(cx);
         }
+    }
+
+    fn render_repository_selector(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // A path history is tied to a file of its repository, so switching the
+        // repository underneath it would not make sense.
+        if self.is_path_history() {
+            return None;
+        }
+
+        let git_store = self.git_store.read(cx);
+        let display_names = git_store.display_names(cx);
+        let mut repositories = git_store
+            .repositories()
+            .values()
+            .map(|repository| {
+                let repository = repository.read(cx);
+                let name = display_names
+                    .get(&repository.id)
+                    .cloned()
+                    .unwrap_or_else(|| repository.display_name());
+                (repository.id, name)
+            })
+            .collect::<Vec<_>>();
+        repositories.sort_by_key(|(_, name)| name.to_lowercase());
+
+        let current_name = repositories
+            .iter()
+            .find(|(repo_id, _)| *repo_id == self.repo_id)
+            .map(|(_, name)| name.clone())?;
+        let current_repo_id = self.repo_id;
+        let git_graph = cx.weak_entity();
+
+        Some(
+            PopoverMenu::new("git-graph-repository-selector")
+                .trigger_with_tooltip(
+                    Button::new("git-graph-repository-selector-trigger", current_name)
+                        .label_size(LabelSize::Small)
+                        .end_icon(
+                            Icon::new(IconName::ChevronDown)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                    Tooltip::text("Select Repository"),
+                )
+                .anchor(Anchor::TopLeft)
+                .menu(move |window, cx| {
+                    let repositories = repositories.clone();
+                    let git_graph = git_graph.clone();
+                    Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        for (repo_id, name) in repositories {
+                            let git_graph = git_graph.clone();
+                            menu = menu.toggleable_entry(
+                                name,
+                                repo_id == current_repo_id,
+                                IconPosition::Start,
+                                None,
+                                move |_window, cx| {
+                                    git_graph
+                                        .update(cx, |git_graph, cx| {
+                                            git_graph.set_repo_id(repo_id, cx)
+                                        })
+                                        .log_err();
+                                },
+                            );
+                        }
+                        menu
+                    }))
+                })
+                .into_any_element(),
+        )
     }
 
     pub fn select_commit_by_sha(&mut self, sha: impl TryInto<Oid>, cx: &mut Context<Self>) {
@@ -2883,6 +2968,7 @@ impl GitGraph {
     }
 
     fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let repository_selector = self.render_repository_selector(cx);
         let color = cx.theme().colors();
         let query_focus_handle = self
             .search_state
@@ -2901,6 +2987,7 @@ impl GitGraph {
             .gap_1p5()
             .border_b_1()
             .border_color(color.border_variant)
+            .children(repository_selector)
             .child(
                 h_flex()
                     .h_8()

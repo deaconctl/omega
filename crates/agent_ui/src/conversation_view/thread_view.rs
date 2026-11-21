@@ -5591,6 +5591,9 @@ impl ThreadView {
 
         let focus_handle = self.message_editor.focus_handle(cx);
         let editor_bg_color = cx.theme().colors().editor_background;
+        // The floating layout rounds every card, so the composer is drawn as a
+        // rounded box of its own instead of a band across the panel.
+        let rounded_composer = workspace::FloatingLayout::get(cx).is_some();
 
         let editor_expanded = self.editor_expanded;
         let (expand_icon, expand_tooltip) = if editor_expanded {
@@ -5628,13 +5631,15 @@ impl ThreadView {
             .map(|this| {
                 if has_messages {
                     this.on_action(cx.listener(Self::expand_message_editor))
-                        .border_t_1()
-                        .border_color(cx.theme().colors().border)
+                        .when(!rounded_composer, |this| {
+                            this.border_t_1().border_color(cx.theme().colors().border)
+                        })
                         .when(editor_expanded, |this| this.h(vh(0.8, window)))
                 } else {
                     this.flex_1().size_full()
                 }
             })
+            .when(rounded_composer, |this| this.px_2())
             .child(
                 v_flex()
                     .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
@@ -5642,6 +5647,12 @@ impl ThreadView {
                     .min_w_0()
                     .when(fills_container, |this| this.h_full())
                     .px_2()
+                    .when(rounded_composer, |this| {
+                        this.py_1p5()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                    })
                     .flex_shrink_1()
                     .flex_grow_0()
                     .justify_between()
@@ -5702,6 +5713,7 @@ impl ThreadView {
                                     .gap_0p5()
                                     .child(self.render_add_context_button(cx))
                                     .child(self.render_follow_toggle(cx))
+                                    .children(self.render_plan_usage(cx))
                                     .map(|this| match &self.config_options_view {
                                         Some(config_view) => this
                                             .children(config_view.read(cx).response_controls(cx)),
@@ -5997,6 +6009,71 @@ impl ThreadView {
         self.as_native_thread(cx)
             .and_then(|thread| thread.read(cx).model())
             .is_some_and(|model| model.supports_split_token_display())
+    }
+
+    fn render_plan_usage(&self, cx: &App) -> Option<AnyElement> {
+        let plan_usage = self.thread.read(cx).plan_usage()?;
+        let now = chrono::Utc::now();
+        let constrained = plan_usage.most_constrained_window(now)?;
+        let utilization = constrained.utilization?;
+
+        let ring_color = plan_usage_color(constrained.status, utilization).color(cx);
+
+        let rows = plan_usage
+            .current_windows(now)
+            .map(|window| {
+                let mut detail = match (window.status, window.utilization) {
+                    (Some(acp_thread::PlanUsageStatus::Rejected), _) => "Limit reached".to_string(),
+                    (_, Some(utilization)) => format_plan_utilization(utilization),
+                    (_, None) => "Unknown".to_string(),
+                };
+                if let Some(resets_at) = window.resets_at {
+                    detail.push_str(&format!(
+                        " · resets in {}",
+                        format_time_until(resets_at - now)
+                    ));
+                }
+                let color = plan_usage_color(window.status, window.utilization.unwrap_or_default());
+                (
+                    SharedString::from(window.kind.label()),
+                    SharedString::from(detail),
+                    color,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        Some(
+            h_flex()
+                .id("plan_usage")
+                .flex_shrink_0()
+                .mt_px()
+                .mx_1()
+                .child(
+                    // The ring is capped at full: past the limit the color
+                    // already tells the window is exhausted.
+                    CircularProgress::new(utilization.clamp(0., 1.), 1., px(16.), cx)
+                        .stroke_width(px(2.))
+                        .progress_color(ring_color),
+                )
+                .tooltip(Tooltip::element(move |_window, _cx| {
+                    v_flex()
+                        .gap_0p5()
+                        .child(
+                            Label::new("Plan Usage")
+                                .color(Color::Muted)
+                                .size(LabelSize::Small),
+                        )
+                        .children(rows.iter().map(|(label, detail, color)| {
+                            h_flex()
+                                .gap_4()
+                                .justify_between()
+                                .child(Label::new(label.clone()))
+                                .child(Label::new(detail.clone()).color(*color))
+                        }))
+                        .into_any_element()
+                }))
+                .into_any_element(),
+        )
     }
 
     fn render_token_usage(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -7155,6 +7232,33 @@ impl Render for ResponseSpeedTooltip {
                         .child(KeyBinding::for_action_in(&ToggleFastMode, &self.focus, cx)),
                 )
         })
+    }
+}
+
+fn format_plan_utilization(utilization: f32) -> String {
+    format!("{}%", (utilization.max(0.) * 100.).round() as u32)
+}
+
+fn plan_usage_color(status: Option<acp_thread::PlanUsageStatus>, utilization: f32) -> Color {
+    match status {
+        Some(acp_thread::PlanUsageStatus::Rejected) => Color::Error,
+        Some(acp_thread::PlanUsageStatus::Warning) => Color::Warning,
+        _ if utilization >= 0.85 => Color::Warning,
+        _ => Color::Muted,
+    }
+}
+
+fn format_time_until(duration: chrono::TimeDelta) -> String {
+    let total_minutes = duration.num_minutes().max(0);
+    let days = total_minutes / (24 * 60);
+    let hours = (total_minutes / 60) % 24;
+    let minutes = total_minutes % 60;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m")
     }
 }
 

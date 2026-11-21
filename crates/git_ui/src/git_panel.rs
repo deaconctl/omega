@@ -7515,9 +7515,19 @@ impl GitPanel {
             .child(
                 panel_editor_container(window, cx)
                     .id("commit-editor-container")
-                    .w_full()
                     .when(self.commit_editor_expanded, |this| this.flex_1().min_h_0())
-                    .border_t_1()
+                    // The floating layout rounds every card, so the commit editor
+                    // is drawn as a rounded box of its own instead of a band across
+                    // the panel. The container is `size_full`, and a full width plus
+                    // the margins would push its right edge past the panel, so the
+                    // width goes back to auto and the column stretches it instead.
+                    .map(|this| {
+                        if workspace::FloatingLayout::get(cx).is_some() {
+                            this.w_auto().m_2().rounded_lg().border_1()
+                        } else {
+                            this.w_full().border_t_1()
+                        }
+                    })
                     .border_color(if title_exceeds_limit {
                         cx.theme().status().warning_border
                     } else {

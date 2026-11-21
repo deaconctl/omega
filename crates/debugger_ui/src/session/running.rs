@@ -259,6 +259,32 @@ impl SubView {
         this
     }
 
+    pub(crate) fn terminal(
+        debug_terminal: Entity<DebugTerminal>,
+        running_state: WeakEntity<RunningState>,
+        host_pane: WeakEntity<Pane>,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        let weak_terminal = debug_terminal.downgrade();
+        let this = Self::new(
+            debug_terminal.focus_handle(cx),
+            debug_terminal.into(),
+            DebuggerPaneItem::Terminal,
+            running_state,
+            host_pane,
+            cx,
+        );
+
+        this.update(cx, |this, _| {
+            this.with_actions(Box::new(move |_, cx| {
+                weak_terminal
+                    .read_with(cx, |terminal, cx| terminal.render_control_strip(cx))
+                    .unwrap_or_else(|_| div().into_any_element())
+            }));
+        });
+        this
+    }
+
     pub(crate) fn view_kind(&self) -> DebuggerPaneItem {
         self.kind
     }
@@ -717,6 +743,31 @@ impl DebugTerminal {
             focus_handle,
             _subscriptions: [focus_subscription],
         }
+    }
+}
+
+impl DebugTerminal {
+    fn render_control_strip(&self, cx: &App) -> AnyElement {
+        let Some(terminal_view) = self.terminal.as_ref() else {
+            return div().into_any_element();
+        };
+        // Dispatching through the terminal view's own focus handle reuses its
+        // `Clear` handler, which also resets the scroll position and respects
+        // read-only terminals.
+        let focus_handle = terminal_view.focus_handle(cx);
+
+        IconButton::new("debug-terminal-clear", IconName::ListX)
+            .icon_size(IconSize::Small)
+            .tooltip({
+                let focus_handle = focus_handle.clone();
+                move |_window, cx| {
+                    Tooltip::for_action_in("Clear Terminal", &terminal::Clear, &focus_handle, cx)
+                }
+            })
+            .on_click(move |_, window, cx| {
+                focus_handle.dispatch_action(&terminal::Clear, window, cx);
+            })
+            .into_any_element()
     }
 }
 
@@ -1468,10 +1519,8 @@ impl RunningState {
                 host_pane,
                 cx,
             )),
-            DebuggerPaneItem::Terminal => Box::new(SubView::new(
-                self.debug_terminal.focus_handle(cx),
-                self.debug_terminal.clone().into(),
-                item_kind,
+            DebuggerPaneItem::Terminal => Box::new(SubView::terminal(
+                self.debug_terminal.clone(),
                 running_state,
                 host_pane,
                 cx,
@@ -2027,10 +2076,8 @@ impl RunningState {
         });
 
         let rightmost_pane = new_debugger_pane(workspace.clone(), project, window, cx);
-        let rightmost_terminal = SubView::new(
-            debug_terminal.focus_handle(cx),
-            debug_terminal.clone().into(),
-            DebuggerPaneItem::Terminal,
+        let rightmost_terminal = SubView::terminal(
+            debug_terminal.clone(),
             running_state,
             rightmost_pane.downgrade(),
             cx,

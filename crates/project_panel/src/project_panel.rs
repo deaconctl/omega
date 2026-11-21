@@ -6303,7 +6303,13 @@ impl ProjectPanel {
                 },
             )
             .cursor_pointer()
-            .rounded_none()
+            .map(|this| {
+                if workspace::FloatingLayout::get(cx).is_some() {
+                    this.rounded_md()
+                } else {
+                    this.rounded_none()
+                }
+            })
             .bg(bg_color)
             .border_1()
             .border_r_2()
