@@ -5,14 +5,12 @@ mod reliability;
 mod watcher_debug;
 mod zed;
 
-// Ensure the binary name stays in sync with APP_NAME so that the paths used
-// at runtime (data dir, config dir, etc.) match what the binary is called.
+// Omega changes APP_NAME but keeps the internal `zed` binary name, which the
+// bundle scripts and the CLI's lookup paths (`Contents/MacOS/zed`) depend on.
+// Runtime paths derive only from APP_NAME, so the two don't need to match.
 const _: () = assert!(
-    paths::APP_NAME_LOWERCASE
-        .as_bytes()
-        .eq_ignore_ascii_case(env!("CARGO_BIN_NAME").as_bytes()),
-    "paths::APP_NAME_LOWERCASE must match the binary name. \
-     Forks: update APP_NAME in crates/paths/src/paths.rs when renaming the binary.",
+    env!("CARGO_BIN_NAME").as_bytes().eq_ignore_ascii_case(b"zed"),
+    "The CLI and bundle scripts expect the main binary to be named `zed`.",
 );
 
 use agent_ui::AgentPanel;

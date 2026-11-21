@@ -68,7 +68,8 @@ echo "Using macOS SDK $sdk_version at $SDKROOT (deployment target 12.0)"
 
 # Get release channel
 pushd crates/zed
-channel=$(<RELEASE_CHANNEL)
+# ZED_RELEASE_CHANNEL lets a local build pick its channel without editing RELEASE_CHANNEL.
+channel="${ZED_RELEASE_CHANNEL:-$(<RELEASE_CHANNEL)}"
 export ZED_RELEASE_CHANNEL="${channel}"
 popd
 
@@ -274,8 +275,9 @@ function sign_app_binaries() {
         open "$app_path"
     fi
 
-    if [[ "$target_dir" = "debug" ]]; then
-        echo "Debug build detected - skipping DMG creation and signing"
+    # A local install has already moved the bundle into /Applications.
+    if [[ "$target_dir" = "debug" || "$local_install" = true ]]; then
+        echo "Debug build or local install - skipping DMG creation"
         if [ "$local_install" = false ]; then
             echo "Created application bundle:"
             echo "$app_path"

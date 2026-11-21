@@ -87,7 +87,9 @@ fi
 
 export ZED_BUNDLE=true
 
-channel=$(<crates/zed/RELEASE_CHANNEL)
+# ZED_RELEASE_CHANNEL lets a local build pick its channel without editing RELEASE_CHANNEL.
+channel="${ZED_RELEASE_CHANNEL:-$(<crates/zed/RELEASE_CHANNEL)}"
+export ZED_RELEASE_CHANNEL="${channel}"
 target_dir="${CARGO_TARGET_DIR:-target}"
 
 version="$(script/get-crate-version zed)"
