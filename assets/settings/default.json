@@ -460,6 +460,10 @@
   // 3. Display code lenses in the code action menu.
   //      "code_lens": "menu",
   "code_lens": "off",
+  // Whether to show how many times each function and method is referenced
+  // across the project, above its declaration. Requires a language server
+  // that supports finding references. Not shown while `code_lens` is "on".
+  "reference_counts": true,
   // What to do when go to definition yields no results.
   //
   // 1. Do nothing: `none`

@@ -11371,6 +11371,21 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
         files: USER,
     })];
 
+    let reference_counts_item = [SettingsPageItem::SettingItem(SettingItem {
+        title: "Reference Counts",
+        description: "Show how many times each function and method is referenced across the project.",
+        field: Box::new(SettingField {
+            organization_override: None,
+            json_path: Some("reference_counts"),
+            pick: |settings_content| settings_content.editor.reference_counts.as_ref(),
+            write: |settings_content, value, _| {
+                settings_content.editor.reference_counts = value;
+            },
+        }),
+        metadata: None,
+        files: USER,
+    })];
+
     let lsp_document_colors_item = [SettingsPageItem::SettingItem(SettingItem {
         title: "LSP Document Colors",
         description: "How to render LSP color previews in the editor.",
@@ -11397,6 +11412,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             completions_section(),
             inlay_hints_section(),
             code_lens_item,
+            reference_counts_item,
             lsp_document_colors_item,
             tasks_section(),
             miscellaneous_section(),
@@ -11413,6 +11429,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             completions_section(),
             inlay_hints_section(),
             code_lens_item,
+            reference_counts_item,
             tasks_section(),
             miscellaneous_section(),
         )

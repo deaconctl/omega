@@ -238,6 +238,14 @@ pub struct EditorSettingsContent {
     /// Default: "off"
     pub code_lens: Option<CodeLens>,
 
+    /// Whether to show how many times each function and method is referenced
+    /// across the project, above its declaration. Requires a language server
+    /// that supports finding references. Not shown while `code_lens` is "on",
+    /// as language servers can already provide those counts as code lenses.
+    ///
+    /// Default: true
+    pub reference_counts: Option<bool>,
+
     /// How to render LSP `textDocument/documentColor` colors in the editor.
     ///
     /// Default: [`DocumentColorsRenderMode::Inlay`]

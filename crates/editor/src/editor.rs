@@ -41,6 +41,7 @@ mod lsp_ext;
 mod mouse_context_menu;
 pub mod movement;
 mod persistence;
+mod reference_counts;
 mod runnables;
 mod rust_analyzer_ext;
 pub mod scroll;
@@ -231,6 +232,7 @@ use project::{
     project_settings::{DiagnosticSeverity, GoToDiagnosticSeverityFilter, ProjectSettings},
 };
 use rand::seq::SliceRandom;
+use reference_counts::ReferenceCountsState;
 use regex::Regex;
 use rpc::{ErrorCode, ErrorExt, proto::PeerId};
 use scroll::{Autoscroll, ScrollAnchor, ScrollManager, SharedScrollAnchor};
@@ -1205,6 +1207,7 @@ pub struct Editor {
     selection_drag_state: SelectionDragState,
     colors: Option<LspColorData>,
     code_lens: Option<CodeLensState>,
+    reference_counts: Option<ReferenceCountsState>,
     post_scroll_update: Task<()>,
     use_document_folding_ranges: bool,
     inlay_hints: Option<LspInlayHintData>,
@@ -2244,6 +2247,9 @@ impl Editor {
                             );
                         }
                     }
+                    project::Event::BufferEdited { .. } => {
+                        editor.reference_counts_project_edited(cx);
+                    }
 
                     _ => {}
                 },
@@ -2565,6 +2571,7 @@ impl Editor {
             offscreen_lsp_data_tasks: HashMap::default(),
             colors: None,
             code_lens: None,
+            reference_counts: None,
             use_document_folding_ranges: false,
             inlay_hints: None,
             next_color_inlay_id: 0,
@@ -2746,6 +2753,9 @@ impl Editor {
             editor.inlay_hints = Some(LspInlayHintData::new(inlay_hint_settings));
             if editor.enable_code_lens && EditorSettings::get_global(cx).code_lens.inline() {
                 editor.code_lens = Some(CodeLensState::default());
+            }
+            if editor.reference_counts_enabled_in_settings(cx) {
+                editor.reference_counts = Some(ReferenceCountsState::default());
             }
 
             if let Some(buffer) = multi_buffer.read(cx).as_singleton() {
@@ -10464,6 +10474,11 @@ impl Editor {
                 self.toggle_code_lens(code_lens_inline, window, cx);
             }
 
+            let reference_counts_enabled = self.reference_counts_enabled_in_settings(cx);
+            if reference_counts_enabled != self.reference_counts.is_some() {
+                self.toggle_reference_counts(reference_counts_enabled, cx);
+            }
+
             let lsp_document_links_enabled = EditorSettings::get_global(cx).lsp_document_links;
             if lsp_document_links_enabled != self.lsp_document_links.enabled {
                 self.lsp_document_links.enabled = lsp_document_links_enabled;
@@ -11426,6 +11441,7 @@ impl Editor {
         self.refresh_folding_ranges(for_buffer, window, cx);
         self.refresh_code_lenses(for_buffer, window, cx);
         self.refresh_document_symbols(for_buffer, cx);
+        self.refresh_reference_counts(cx);
     }
 
     fn lsp_data_buffers(
@@ -11528,6 +11544,7 @@ impl Editor {
             }
         }
         self.remove_invalid_code_lenses(buffer_ids, buffers_removed, &snapshot, cx);
+        self.remove_invalid_reference_counts(buffer_ids, buffers_removed, &snapshot, cx);
         self.remove_invalid_inline_diagnostics(buffer_ids, buffers_removed, &snapshot, cx);
         self.remove_invalid_document_colors(buffer_ids, buffers_removed, &snapshot, cx);
     }
@@ -11719,6 +11736,7 @@ impl Editor {
     pub fn disable_code_lens(&mut self, cx: &mut Context<Self>) {
         self.enable_code_lens = false;
         self.clear_code_lenses(cx);
+        self.clear_reference_counts(cx);
     }
 
     pub fn disable_mouse_wheel_zoom(&mut self) {
@@ -11753,6 +11771,7 @@ impl Editor {
         self.colorize_brackets(false, cx);
         self.refresh_inlay_hints(InlayHintRefreshReason::NewLinesShown, cx);
         self.resolve_visible_code_lenses(cx);
+        self.refresh_reference_counts(cx);
 
         if !self.buffer().read(cx).is_singleton() || self.needs_initial_data_update {
             self.needs_initial_data_update = false;
@@ -12790,7 +12809,8 @@ impl Focusable for Editor {
 }
 
 impl Render for Editor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_stale_reference_counts_on_render(window, cx);
         EditorElement::new(&cx.entity(), self.create_style(cx))
     }
 }
