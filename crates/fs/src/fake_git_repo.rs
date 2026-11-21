@@ -59,7 +59,6 @@ pub enum FakeCommitDataEntry {
 #[derive(Debug, Clone)]
 pub struct FakeGitRepositoryState {
     pub commit_history: Vec<FakeCommitSnapshot>,
-    pub event_emitter: async_channel::Sender<PathBuf>,
     pub unmerged_paths: HashMap<RepoPath, UnmergedStatus>,
     pub head_contents: HashMap<RepoPath, Vec<u8>>,
     pub index_contents: HashMap<RepoPath, Vec<u8>>,
@@ -75,7 +74,6 @@ pub struct FakeGitRepositoryState {
     /// List of remotes, keys are names and values are URLs
     pub remotes: HashMap<String, String>,
     pub simulated_index_write_error_message: Option<String>,
-    pub simulated_create_worktree_error: Option<String>,
     pub simulated_graph_error: Option<String>,
     /// Revisions that fail any `load_revisions` call that includes them.
     pub simulated_unreadable_revisions: HashSet<String>,
@@ -93,9 +91,8 @@ pub struct FakeGitRepositoryState {
 }
 
 impl FakeGitRepositoryState {
-    pub fn new(event_emitter: async_channel::Sender<PathBuf>) -> Self {
+    pub fn new() -> Self {
         FakeGitRepositoryState {
-            event_emitter,
             blob_read_gate: None,
             head_contents: Default::default(),
             index_contents: Default::default(),
@@ -107,7 +104,6 @@ impl FakeGitRepositoryState {
             branches: Default::default(),
             branch_upstreams: Default::default(),
             simulated_index_write_error_message: Default::default(),
-            simulated_create_worktree_error: Default::default(),
             simulated_graph_error: None,
             simulated_unreadable_revisions: HashSet::default(),
             load_revisions_calls: Vec::new(),
@@ -852,10 +848,6 @@ impl GitRepository for FakeGitRepository {
             fs.with_git_state(&dot_git_path, false, {
                 let branch_name = branch_name.clone();
                 move |state| {
-                    if let Some(message) = &state.simulated_create_worktree_error {
-                        anyhow::bail!("{message}");
-                    }
-
                     match (create_branch_ref, branch_name.as_ref()) {
                         (true, Some(branch_name)) => {
                             if state.branches.contains(branch_name) {

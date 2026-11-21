@@ -44,7 +44,6 @@ pub fn assign_kernelspec(
         session.update(cx, |session, cx| {
             session.clear_outputs(cx);
             session.shutdown(window, cx);
-            cx.notify();
         });
     }
 
@@ -427,7 +426,6 @@ pub fn shutdown(editor: WeakEntity<Editor>, window: &mut Window, cx: &mut App) {
 
     session.update(cx, |session, cx| {
         session.shutdown(window, cx);
-        cx.notify();
     });
 }
 
@@ -448,7 +446,6 @@ pub fn restart(editor: WeakEntity<Editor>, window: &mut Window, cx: &mut App) {
 
     session.update(cx, |session, cx| {
         session.restart(window, cx);
-        cx.notify();
     });
 }
 
