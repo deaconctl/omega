@@ -5625,7 +5625,9 @@ impl ThreadView {
 
         h_flex()
             .py_2()
-            .bg(editor_bg_color)
+            // The rounded composer sits on the panel itself, so only the box inside
+            // its border takes the editor background.
+            .when(!rounded_composer, |this| this.bg(editor_bg_color))
             .justify_center()
             .on_action(cx.listener(Self::handle_message_editor_move_up))
             .map(|this| {
@@ -5652,6 +5654,7 @@ impl ThreadView {
                             .rounded_lg()
                             .border_1()
                             .border_color(cx.theme().colors().border)
+                            .bg(editor_bg_color)
                     })
                     .flex_shrink_1()
                     .flex_grow_0()
