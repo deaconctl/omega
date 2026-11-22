@@ -7515,6 +7515,7 @@ impl GitPanel {
             .child(
                 panel_editor_container(window, cx)
                     .id("commit-editor-container")
+                    .min_w_0()
                     .when(self.commit_editor_expanded, |this| this.flex_1().min_h_0())
                     // The floating layout rounds every card, so the commit editor
                     // is drawn as a rounded box of its own instead of a band across
@@ -7546,6 +7547,7 @@ impl GitPanel {
                                         .px_2()
                                         .h_full()
                                         .flex_grow_1()
+                                        .min_w_0()
                                         .cursor_text()
                                         .on_action(|&zed_actions::editor::MoveUp, _, cx| {
                                             cx.stop_propagation();
@@ -7570,6 +7572,11 @@ impl GitPanel {
                             .when(editor_is_long, |el| {
                                 el.border_color(cx.theme().colors().border_variant)
                             })
+                            // Neither group of buttons can shrink, so in a narrow
+                            // panel the commit button wraps onto its own line
+                            // instead of overflowing past the right edge.
+                            .flex_wrap()
+                            .gap_y_1()
                             .justify_between()
                             .child(
                                 h_flex()
@@ -7579,6 +7586,7 @@ impl GitPanel {
                             )
                             .child(
                                 h_flex()
+                                    .ml_auto()
                                     .gap_0p5()
                                     .children(enable_coauthors)
                                     .child(self.render_commit_button(cx)),

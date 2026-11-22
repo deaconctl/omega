@@ -6024,11 +6024,16 @@ impl ThreadView {
             .and_then(|window| Some((window.status, window.utilization?)));
 
         let (utilization, ring_color) = match constrained {
-            Some((status, utilization)) => {
-                (utilization, plan_usage_color(status, utilization).color(cx))
-            }
-            None => (0., Color::Muted.color(cx)),
+            Some((status, utilization)) => (utilization, plan_usage_color(status, utilization)),
+            None => (0., Color::Muted),
         };
+        // The context window ring next to it is muted too, so the plan ring
+        // takes the accent color until a warning color takes over.
+        let ring_color = match ring_color {
+            Color::Muted => Color::Accent,
+            color => color,
+        }
+        .color(cx);
 
         let rows = plan_usage
             .into_iter()
