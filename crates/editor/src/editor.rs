@@ -2112,6 +2112,7 @@ impl Editor {
                     }
                     project::Event::RefreshCodeLens { .. } => {
                         editor.refresh_code_lenses(None, window, cx);
+                        editor.invalidate_reference_counts(cx);
                     }
                     project::Event::RefreshDocumentColors { .. } => {
                         editor.refresh_document_colors(None, window, cx);
@@ -2129,6 +2130,7 @@ impl Editor {
                         editor.refresh_document_symbols(None, cx);
                     }
                     project::Event::RefreshInlayHints { server_id } => {
+                        editor.invalidate_reference_counts(cx);
                         editor.refresh_inlay_hints(
                             InlayHintRefreshReason::RefreshRequested {
                                 server_id: *server_id,
@@ -2248,7 +2250,7 @@ impl Editor {
                         }
                     }
                     project::Event::BufferEdited { .. } => {
-                        editor.reference_counts_project_edited(cx);
+                        editor.invalidate_reference_counts(cx);
                     }
 
                     _ => {}

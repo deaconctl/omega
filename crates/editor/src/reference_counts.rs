@@ -50,12 +50,13 @@ pub(super) struct ReferenceCountsState {
     blocks: HashMap<BufferId, Vec<ReferenceCountBlock>>,
     queries: HashMap<BufferId, ReferenceCountsQuery>,
     /// Bumped on every edit to any buffer of the project, as an edit anywhere
-    /// can add or remove usages of the functions shown here.
+    /// can add or remove usages of the functions shown here, and when language
+    /// servers refresh their results.
     generation: usize,
-    /// Set once project edits settle. The next render requests the counts
+    /// Set once invalidations settle. The next render requests the counts
     /// that went stale, so editors that aren't shown don't query anything.
     refresh_on_render: bool,
-    edits_settled: Task<()>,
+    invalidations_settled: Task<()>,
 }
 
 impl Default for ReferenceCountsState {
@@ -65,7 +66,7 @@ impl Default for ReferenceCountsState {
             queries: HashMap::default(),
             generation: 0,
             refresh_on_render: false,
-            edits_settled: Task::ready(()),
+            invalidations_settled: Task::ready(()),
         }
     }
 }
@@ -92,12 +93,16 @@ impl Editor {
         self.request_reference_counts(REFERENCE_COUNTS_DEBOUNCE, cx);
     }
 
-    pub(super) fn reference_counts_project_edited(&mut self, cx: &mut Context<Self>) {
+    /// Marks every count as stale: called on edits anywhere in the project, and
+    /// when a language server asks for its results to be refreshed. Servers do
+    /// that once they finish indexing the workspace, before which they only
+    /// know about the open files and report too few references.
+    pub(super) fn invalidate_reference_counts(&mut self, cx: &mut Context<Self>) {
         let Some(state) = self.reference_counts.as_mut() else {
             return;
         };
         state.generation += 1;
-        state.edits_settled = cx.spawn(async move |editor, cx| {
+        state.invalidations_settled = cx.spawn(async move |editor, cx| {
             cx.background_executor()
                 .timer(REFERENCE_COUNTS_DEBOUNCE)
                 .await;
@@ -576,13 +581,14 @@ fn build_reference_count_renderer(
 mod tests {
     use std::sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     };
 
     use gpui::{TestAppContext, UpdateGlobal as _};
     use multi_buffer::ToPoint as _;
     use settings::{CodeLens, SettingsStore};
     use text::Point;
+    use util::path;
 
     use super::REFERENCE_COUNTS_DEBOUNCE;
     use crate::{
@@ -671,11 +677,16 @@ mod tests {
             );
         });
 
+        // Servers finishing their startup work also invalidate the counts.
         cx.executor().advance_clock(REFERENCE_COUNTS_DEBOUNCE);
+        cx.run_until_parked();
+        while references_requests.try_recv().is_ok() {}
+
+        cx.executor().advance_clock(REFERENCE_COUNTS_DEBOUNCE * 4);
         cx.run_until_parked();
         assert!(
             references_requests.try_recv().is_err(),
-            "counts for an unchanged buffer should not be requested again"
+            "counts should not be requested again while nothing changes"
         );
     }
 
@@ -751,6 +762,75 @@ mod tests {
                 reference_counts(editor, cx),
                 vec![(0, 3), (1, 0)],
                 "an edit in another buffer should refresh the visible counts"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_reference_counts_refreshed_when_server_finishes_indexing(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx, |_| {});
+        let mut cx = references_test_context(cx).await;
+        let indexed = Arc::new(AtomicBool::new(false));
+        cx.set_request_handler::<lsp::request::References, _, _>({
+            let indexed = indexed.clone();
+            move |uri, params, _| {
+                let indexed = indexed.load(Ordering::SeqCst);
+                async move {
+                    let line = params.text_document_position.position.line;
+                    let mut locations = vec![location(&uri, line, 9, 14)];
+                    // Before indexing, the server only knows about the open file.
+                    if line == 0 {
+                        locations.push(location(&uri, 3, 0, 5));
+                        if indexed {
+                            locations.push(lsp::Location {
+                                uri: lsp::Uri::from_file_path(path!("/root/other.ts")).unwrap(),
+                                range: lsp::Range::new(
+                                    lsp::Position::new(0, 0),
+                                    lsp::Position::new(0, 5),
+                                ),
+                            });
+                        }
+                    }
+                    Ok(Some(locations))
+                }
+            }
+        });
+
+        cx.set_state(TEXT);
+        // Let the invalidations from the server's startup work settle first.
+        for _ in 0..2 {
+            cx.executor().advance_clock(REFERENCE_COUNTS_DEBOUNCE);
+            cx.run_until_parked();
+        }
+        cx.editor(|editor, _, cx| {
+            assert_eq!(reference_counts(editor, cx), vec![(0, 1), (1, 0)]);
+        });
+
+        indexed.store(true, Ordering::SeqCst);
+        cx.executor().advance_clock(REFERENCE_COUNTS_DEBOUNCE * 4);
+        cx.run_until_parked();
+        cx.editor(|editor, _, cx| {
+            assert_eq!(
+                reference_counts(editor, cx),
+                vec![(0, 1), (1, 0)],
+                "counts are not requested again until something invalidates them"
+            );
+        });
+
+        cx.lsp
+            .request::<lsp::request::CodeLensRefresh>((), lsp::DEFAULT_LSP_REQUEST_TIMEOUT)
+            .await
+            .into_response()
+            .expect("code lens refresh request failed");
+        cx.executor().advance_clock(REFERENCE_COUNTS_DEBOUNCE);
+        cx.run_until_parked();
+        cx.editor(|editor, _, cx| {
+            assert_eq!(
+                reference_counts(editor, cx),
+                vec![(0, 2), (1, 0)],
+                "counts should be requested again once the server asks for a refresh"
             );
         });
     }
