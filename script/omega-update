@@ -12,15 +12,23 @@ Pull the current branch, build Omega on the stable channel and install it.
 
 Options:
   --no-pull   Build the checkout as it is, without running git pull first.
+  --package   Linux only: build target/release/omega-linux-<arch>.tar.gz without
+              installing it. To install it on another machine:
+                tar -xzf omega-linux-<arch>.tar.gz && ./omega.app/install
   -h, --help  Display this help and exit.
 "
 }
 
 pull=true
+install=true
 while [[ $# -gt 0 ]]; do
     case $1 in
         --no-pull)
             pull=false
+            shift
+            ;;
+        --package)
+            install=false
             shift
             ;;
         -h|--help)
@@ -38,23 +46,27 @@ done
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_dir"
 
+if ! "$install" && [[ "$(uname -s)" != "Linux" ]]; then
+    echo "--package is only supported on Linux." >&2
+    exit 1
+fi
+
 if "$pull"; then
     git pull --ff-only
 fi
 
 export ZED_RELEASE_CHANNEL=stable
 # Compiled into the binary: "Check for Updates" shows this instead of contacting
-# Zed's update server, which only knows about upstream releases.
-export ZED_UPDATE_EXPLANATION="Omega is built from source. Run script/omega-update in ${repo_dir} to update it."
+# Zed's update server, which only knows about upstream releases. Packages are
+# also installed on machines without the repository, so it can't name a path.
+export ZED_UPDATE_EXPLANATION="Omega is built from source. Update it by running script/omega-update in the Omega repository, or by installing a newer omega-linux package."
 
-bin_dir="$HOME/.local/bin"
-mkdir -p "$bin_dir"
-
-install_linux() {
-    local arch archive temp_dir app_dir desktop_dir desktop_file missing
+package_linux() {
+    local arch target_dir archive package temp_dir app_dir
     arch="$(uname -m)"
+    target_dir="${CARGO_TARGET_DIR:-target}"
 
-    # The remote server is not installed by this script, so build it against the
+    # The remote server is not part of the package, so build it against the
     # host target instead of musl, which would need musl-gcc.
     if [[ -z "${REMOTE_SERVER_TARGET:-}" ]]; then
         local host_line
@@ -64,60 +76,53 @@ install_linux() {
 
     script/bundle-linux --skip-sentry
 
-    archive="${CARGO_TARGET_DIR:-target}/release/zed-linux-${arch}.tar.gz"
+    archive="$target_dir/release/zed-linux-${arch}.tar.gz"
+    package="$target_dir/release/omega-linux-${arch}.tar.gz"
     temp_dir="$(mktemp -d)"
     trap 'rm -rf "$temp_dir"; trap - RETURN' RETURN
     tar -xzf "$archive" -C "$temp_dir"
-
-    app_dir="$HOME/.local/omega.app"
-    rm -rf "$app_dir"
+    app_dir="$temp_dir/omega.app"
     mv "$temp_dir/zed.app" "$app_dir"
 
-    if command -v ldd >/dev/null 2>&1; then
-        missing="$(ldd "$app_dir/libexec/zed-editor" 2>/dev/null | sed -n 's/^[[:space:]]*\(.*\) => not found$/\1/p')"
-        if [[ -n "$missing" ]]; then
-            echo "Warning: your system is missing libraries that Omega needs:" >&2
-            echo "$missing" >&2
-        fi
-    fi
-
-    ln -sf "$app_dir/bin/zed" "$bin_dir/omega"
-
-    desktop_dir="$HOME/.local/share/applications"
-    desktop_file="$desktop_dir/dev.omega.Omega.desktop"
-    mkdir -p "$desktop_dir"
     # The file name has to match the Wayland app id (ReleaseChannel::app_id) for
     # the compositor to pick up the name and icon. zed:// links are left to Zed.
+    # The install location is filled in by the installer.
+    rm -f "$app_dir"/share/applications/*.desktop
     APP_NAME="Omega" \
-    APP_CLI="$app_dir/bin/zed" \
-    APP_ICON="$app_dir/share/icons/hicolor/512x512/apps/zed.png" \
+    APP_CLI="@APP_DIR@/bin/zed" \
+    APP_ICON="@APP_DIR@/share/icons/hicolor/512x512/apps/zed.png" \
     APP_ARGS="%U" \
     DO_STARTUP_NOTIFY="true" \
         envsubst < crates/zed/resources/zed.desktop.in |
-        sed 's|x-scheme-handler/zed;||' > "$desktop_file"
-    chmod +x "$desktop_file"
-    if command -v update-desktop-database >/dev/null 2>&1; then
-        update-desktop-database "$desktop_dir" || echo "Warning: update-desktop-database failed" >&2
-    fi
+        sed 's|x-scheme-handler/zed;||' > "$app_dir/share/applications/dev.omega.Omega.desktop"
 
-    echo "Omega installed in $app_dir"
+    cp script/omega-install-linux "$app_dir/install"
+    chmod +x "$app_dir/install"
+
+    tar -czf "$package" -C "$temp_dir" omega.app
+    echo "Omega package created: $package"
+
+    if "$install"; then
+        "$app_dir/install"
+    fi
 }
 
 install_mac() {
+    local bin_dir="$HOME/.local/bin"
     script/bundle-mac -i
+    mkdir -p "$bin_dir"
     ln -sf "/Applications/Omega.app/Contents/MacOS/cli" "$bin_dir/omega"
     echo "Omega installed in /Applications/Omega.app"
+    if [[ "$(command -v omega || true)" != "$bin_dir/omega" ]]; then
+        echo "Add $bin_dir to your PATH to run Omega with 'omega'."
+    fi
 }
 
 case "$(uname -s)" in
-    Linux) install_linux ;;
+    Linux) package_linux ;;
     Darwin) install_mac ;;
     *)
         echo "Unsupported platform: $(uname -s)" >&2
         exit 1
         ;;
 esac
-
-if [[ "$(command -v omega || true)" != "$bin_dir/omega" ]]; then
-    echo "Add $bin_dir to your PATH to run Omega with 'omega'."
-fi

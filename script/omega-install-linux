@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+
+# Installs the Omega bundle this script sits in. `script/omega-update` copies it
+# into every package as `omega.app/install`, so a machine that only receives the
+# .tar.gz can install it without the repository or a Rust toolchain.
+
+set -euo pipefail
+
+source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+app_dir="$HOME/.local/omega.app"
+bin_dir="$HOME/.local/bin"
+desktop_dir="$HOME/.local/share/applications"
+
+if [[ ! -x "$source_dir/libexec/zed-editor" ]]; then
+    echo "No Omega bundle found next to this script ($source_dir)." >&2
+    exit 1
+fi
+
+# Checked before touching the current install, so an incompatible package (a
+# different architecture, or built against a newer glibc) leaves it working.
+if command -v ldd >/dev/null 2>&1; then
+    if ! ldd_output="$(ldd "$source_dir/libexec/zed-editor" 2>&1)"; then
+        echo "This Omega package can't run on this machine:" >&2
+        echo "$ldd_output" >&2
+        exit 1
+    fi
+    missing="$(grep 'not found' <<< "$ldd_output" || true)"
+    if [[ -n "$missing" ]]; then
+        echo "This Omega package can't run on this machine:" >&2
+        echo "$missing" >&2
+        echo "A 'GLIBC_x.y not found' error means it was built on a system with a newer glibc;" >&2
+        echo "build it on a system at most as new as this one ($(ldd --version | head -n 1))." >&2
+        exit 1
+    fi
+fi
+
+if [[ "$source_dir" != "$app_dir" ]]; then
+    mkdir -p "$(dirname "$app_dir")"
+    rm -rf "$app_dir"
+    cp -a "$source_dir" "$app_dir"
+fi
+
+mkdir -p "$bin_dir"
+ln -sf "$app_dir/bin/zed" "$bin_dir/omega"
+
+# The desktop entry is rendered when packaging, with the install location left
+# as a placeholder since it depends on the user it's installed for.
+mkdir -p "$desktop_dir"
+desktop_file="$desktop_dir/dev.omega.Omega.desktop"
+sed "s|@APP_DIR@|$app_dir|g" "$app_dir/share/applications/dev.omega.Omega.desktop" > "$desktop_file"
+chmod +x "$desktop_file"
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$desktop_dir" || echo "Warning: update-desktop-database failed" >&2
+fi
+
+echo "Omega installed in $app_dir"
+if [[ "$(command -v omega || true)" != "$bin_dir/omega" ]]; then
+    echo "Add $bin_dir to your PATH to run Omega with 'omega'."
+fi
