@@ -100,16 +100,18 @@ impl PlanUsage {
             .filter(move |window| !window.has_reset(now))
     }
 
-    /// The current window closest to its limit, which is the one that will
-    /// block the agent first.
-    pub fn most_constrained_window(&self, now: DateTime<Utc>) -> Option<&PlanUsageWindow> {
+    /// The current 5-hour window, which tracks the usage of the ongoing
+    /// session rather than of the whole week.
+    pub fn session_window(&self, now: DateTime<Utc>) -> Option<&PlanUsageWindow> {
         self.current_windows(now)
-            .filter(|window| window.utilization.is_some())
-            .max_by(|a, b| {
-                let a = a.utilization.unwrap_or_default();
-                let b = b.utilization.unwrap_or_default();
-                a.total_cmp(&b)
-            })
+            .find(|window| window.kind == PlanUsageWindowKind::FiveHour)
+    }
+
+    /// Whether any current window has hit its limit, which blocks the agent
+    /// regardless of how much of the other windows is left.
+    pub fn is_blocked(&self, now: DateTime<Utc>) -> bool {
+        self.current_windows(now)
+            .any(|window| window.status == Some(PlanUsageStatus::Rejected))
     }
 
     /// Applies the rate-limit state an agent attached to a `usage_update`.
@@ -235,9 +237,10 @@ mod tests {
         assert_eq!(windows[1].kind, PlanUsageWindowKind::Weekly);
         assert_eq!(windows[1].status, None);
         assert_eq!(
-            usage.most_constrained_window(now).map(|window| window.kind),
+            usage.session_window(now).map(|window| window.kind),
             Some(PlanUsageWindowKind::FiveHour)
         );
+        assert!(!usage.is_blocked(now));
     }
 
     #[test]
@@ -263,6 +266,11 @@ mod tests {
         assert_eq!(window.utilization, Some(0.4));
         assert_eq!(window.status, Some(PlanUsageStatus::Rejected));
         assert_eq!(window.resets_at, DateTime::from_timestamp(5_000, 0));
+        assert!(
+            usage.session_window(now).is_none(),
+            "a weekly window is not the session window"
+        );
+        assert!(usage.is_blocked(now));
     }
 
     #[test]
@@ -277,7 +285,7 @@ mod tests {
 
         let after_reset = DateTime::from_timestamp(5_001, 0).expect("valid timestamp");
         assert_eq!(usage.current_windows(after_reset).count(), 0);
-        assert!(usage.most_constrained_window(after_reset).is_none());
+        assert!(usage.session_window(after_reset).is_none());
     }
 
     #[test]

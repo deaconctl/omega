@@ -6017,16 +6017,21 @@ impl ThreadView {
     fn render_plan_usage(&self, cx: &App) -> AnyElement {
         let plan_usage = self.thread.read(cx).plan_usage();
         let now = chrono::Utc::now();
-        // The ring stays in place before the agent reports any usage, and after
-        // every window it reported has reset, so the composer doesn't shift.
-        let constrained = plan_usage
-            .and_then(|plan_usage| plan_usage.most_constrained_window(now))
+        // The ring follows the 5-hour session window; the weekly ones are listed
+        // in the tooltip. It stays in place, empty, before the agent reports any
+        // usage and after the session window resets, so the composer doesn't shift.
+        let session = plan_usage
+            .and_then(|plan_usage| plan_usage.session_window(now))
             .and_then(|window| Some((window.status, window.utilization?)));
+        let blocked = plan_usage.is_some_and(|plan_usage| plan_usage.is_blocked(now));
 
-        let (utilization, ring_color) = match constrained {
+        let (utilization, ring_color) = match session {
             Some((status, utilization)) => (utilization, plan_usage_color(status, utilization)),
             None => (0., Color::Muted),
         };
+        // A weekly limit being hit blocks the agent even with session usage left,
+        // so the ring can't keep looking fine.
+        let ring_color = if blocked { Color::Error } else { ring_color };
         // The context window ring next to it is muted too, so the plan ring
         // takes the accent color until a warning color takes over.
         let ring_color = match ring_color {
