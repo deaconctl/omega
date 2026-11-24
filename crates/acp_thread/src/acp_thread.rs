@@ -6388,6 +6388,14 @@ impl AcpThread {
     }
 
     pub fn update_usage(&mut self, update: acp_v2::UsageUpdate, cx: &mut Context<Self>) {
+        // Read before the metadata is merged into `usage_meta`, which takes it.
+        if let MaybeUndefined::Value(meta) = &update.meta {
+            let mut plan_usage = self.plan_usage.clone().unwrap_or_default();
+            if plan_usage.apply_usage_meta(meta) && self.plan_usage.as_ref() != Some(&plan_usage) {
+                self.plan_usage = Some(plan_usage);
+                cx.notify();
+            }
+        }
         MetadataUpdate::V2(update.meta).apply(&mut self.usage_meta);
         let usage = self.token_usage.get_or_insert_with(Default::default);
         usage.max_tokens = update.size;
@@ -6401,13 +6409,6 @@ impl AcpThread {
                     currency: cost.currency.into(),
                     meta: cost.meta,
                 });
-            }
-        }
-        if let Some(meta) = update.meta.as_ref() {
-            let mut plan_usage = self.plan_usage.clone().unwrap_or_default();
-            if plan_usage.apply_usage_meta(meta) && self.plan_usage.as_ref() != Some(&plan_usage) {
-                self.plan_usage = Some(plan_usage);
-                cx.notify();
             }
         }
         cx.emit(AcpThreadEvent::TokenUsageUpdated(
