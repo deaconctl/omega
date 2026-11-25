@@ -5275,6 +5275,9 @@ impl AcpThread {
                 config_options::from_v1(config_options).map_err(acp_v1::Error::from)?,
             )),
             acp_v1::SessionUpdate::UsageUpdate(update) => {
+                if let Some(meta) = &update.meta {
+                    self.apply_plan_usage_meta(meta, cx);
+                }
                 // v1 metadata describes this report, not a patch to the previous one.
                 self.usage_meta = update.meta;
                 self.update_usage(
@@ -6387,14 +6390,21 @@ impl AcpThread {
         cx.emit(AcpThreadEvent::TokenUsageUpdated(output));
     }
 
+    /// Picks up the subscription rate limits an agent attaches to its usage
+    /// reports. Called from both the v1 and v2 usage paths: v1 reports reach
+    /// [`Self::update_usage`] without their metadata.
+    fn apply_plan_usage_meta(&mut self, meta: &acp_v2::Meta, cx: &mut Context<Self>) {
+        let mut plan_usage = self.plan_usage.clone().unwrap_or_default();
+        if plan_usage.apply_usage_meta(meta) && self.plan_usage.as_ref() != Some(&plan_usage) {
+            self.plan_usage = Some(plan_usage);
+            cx.notify();
+        }
+    }
+
     pub fn update_usage(&mut self, update: acp_v2::UsageUpdate, cx: &mut Context<Self>) {
         // Read before the metadata is merged into `usage_meta`, which takes it.
         if let MaybeUndefined::Value(meta) = &update.meta {
-            let mut plan_usage = self.plan_usage.clone().unwrap_or_default();
-            if plan_usage.apply_usage_meta(meta) && self.plan_usage.as_ref() != Some(&plan_usage) {
-                self.plan_usage = Some(plan_usage);
-                cx.notify();
-            }
+            self.apply_plan_usage_meta(meta, cx);
         }
         MetadataUpdate::V2(update.meta).apply(&mut self.usage_meta);
         let usage = self.token_usage.get_or_insert_with(Default::default);
@@ -23334,6 +23344,48 @@ mod tests {
                     json!({"billed": true})
                 );
             }
+        });
+    }
+
+    #[gpui::test]
+    async fn test_plan_usage_read_from_v1_and_v2_usage_updates(cx: &mut TestAppContext) {
+        init_test(cx);
+        let rate_limit = |utilization: f32| {
+            json!({
+                crate::CLAUDE_RATE_LIMIT_META_KEY: {
+                    "status": "allowed",
+                    "resetsAt": 4_000_000_000_i64,
+                    "rateLimitType": "five_hour",
+                    "utilization": utilization
+                }
+            })
+        };
+
+        let thread = new_test_thread(cx).await;
+        thread.update(cx, |thread, cx| {
+            let meta: acp_v1::Meta = serde_json::from_value(rate_limit(0.25)).expect("meta");
+            thread
+                .handle_session_update(
+                    acp_v1::SessionUpdate::UsageUpdate(
+                        acp_v1::UsageUpdate::new(1000, 10000).meta(meta),
+                    ),
+                    cx,
+                )
+                .unwrap();
+            let session = thread
+                .plan_usage()
+                .and_then(|usage| usage.session_window(chrono::Utc::now()))
+                .expect("v1 usage updates carry the plan usage");
+            assert_eq!(session.utilization, Some(0.25));
+
+            let mut update = json!({"used": 2000, "size": 10000});
+            update["_meta"] = rate_limit(0.5);
+            thread.update_usage(serde_json::from_value(update).expect("usage update"), cx);
+            let session = thread
+                .plan_usage()
+                .and_then(|usage| usage.session_window(chrono::Utc::now()))
+                .expect("v2 usage updates carry the plan usage");
+            assert_eq!(session.utilization, Some(0.5));
         });
     }
 
